@@ -140,7 +140,6 @@ class DomeLNA40cm(DomeBase):
                                  timeout=self["init_timeout"],
                                  xonxoff=0, rtscts=0)
 
-        self.tty.open()
         self.tty.flushInput()
         self.tty.flushOutput()
 
