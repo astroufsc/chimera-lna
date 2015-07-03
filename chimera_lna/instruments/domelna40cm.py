@@ -49,6 +49,9 @@ class DomeLNA40cm(DomeBase):
         self._num_restarts = 0
         self._max_restarts = 3
 
+        # park position
+        self._azPark = 106
+
         # debug log
         self._debugLog = None
         try:
@@ -129,6 +132,13 @@ class DomeLNA40cm(DomeBase):
         self._num_restarts = 0
 
         return True
+
+    @lock
+    def park(self):
+        '''
+        Parks the dome to its park position
+        '''
+        self.slewToAz(self._azPark)
 
     @lock
     def open(self):
@@ -254,9 +264,11 @@ class DomeLNA40cm(DomeBase):
             az -= 847
         else:
             az -= 666
-        az = int(math.ceil((az) * self["az_resolution"]))
+        az = int(math.ceil(az * self["az_resolution"]))
         az -= self._az_shift
         az %= 360
+
+        az += 4  # Ugly bugfixing for a dome in the dome controller.
 
         return Coord.fromDMS(az)
 
@@ -289,6 +301,9 @@ class DomeLNA40cm(DomeBase):
 
     @lock
     def closeSlit(self):
+
+        # Before closing the dome, park it to its park position.
+        self.park()
 
         if not self._checkIdle():  # Verify if dome is idle
             self.log.warning("Error, Dome busy.")
