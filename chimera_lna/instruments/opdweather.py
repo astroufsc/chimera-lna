@@ -64,7 +64,7 @@ class OpdWeather(WeatherBase):
             self.log.error('Error opening url %s: %s' % (uri, e))
             return False
         date_ws, time_ws, temp_out, hum_out, dew_point, wind_speed, wind_dir, pressure, rain = \
-            np.array(self.field_re.split(url.readlines()[-1]))[[0, 1, 2, 5, 6, 7, 8, 15, 16]]
+            np.array(self.field_re.split(url.readlines()[-1].strip()))[[0, 1, 2, 5, 6, 7, 8, 15, 16]]
         url.close()
 
         return date_ws, time_ws, temp_out, hum_out, dew_point, wind_speed, wind_dir, pressure, rain
