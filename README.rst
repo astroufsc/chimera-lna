@@ -36,6 +36,18 @@ Here goes examples of the configuration to be added on ``chimera.config`` file.
      telescope: /FakeTelescope/fake
      model: COTE/LNA
 
+Dome Offset
+-----------
+
+From the Paramount ME mount specification page:
+
+::
+
+    Use the following equation to compute the distance from the center point of the mount to the intersection of the right ascension and declination axis.
+
+    Distance (cm) = 33 * cos(latitude + 29) - 10
+
+Details on the calculations of the mount-dome offset can be found here_ and mirrored `alternatively here`_.
 
 Tested Hardware
 ---------------
@@ -60,3 +72,5 @@ https://github.com/astroufsc/chimera-lna/
 .. _LNA: http://www.lna.br/
 .. _MEADE LX200: http://www.meade.com/products/telescopes/lx200.html
 .. _Optec TCF-S: http://www.optecinc.com/astronomy/catalog/tcf/tcf-s.htm
+.. _here: http://www.dppobservatory.net/DomeAutomation/dome_synchronisation.pdf
+.. _alternatively here: https://raw.githubusercontent.com/astroufsc/chimera-lna/master/docs/dome_synchronisation.pdf
