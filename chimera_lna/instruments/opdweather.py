@@ -44,6 +44,8 @@ class OpdWeather(WeatherBase):
         self._directions = np.array(
             ["N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE", "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"])
         self._angles = np.arange(0, 360, 360. / len(self._directions))
+        self._directions = np.append(self._directions, ["---"])
+        self._angles = np.append(self._angles, [0])
 
     def __start__(self):
         # self.setHz(self.__config__["check_interval"])
@@ -174,8 +176,8 @@ class OpdWeather(WeatherBase):
                 ('ENVTEM', self.temperature(unit_out=units.deg_C).value, '[degC] Weather station temperature'),
                 ('ENVHUM', self.humidity(unit_out=units.pct).value, '[%] Weather station relative humidity'),
                 ('ENVWIN', self.wind_speed(unit_out=units.m / units.s).value, '[m/s] Weather station wind speed'),
-                ('ENVDIR',  self.wind_direction(unit_out=units.deg).value, '[deg] Weather station wind direction'),
-                ('METDEW',  self.dew_point(unit_out=units.deg_C).value, '[degC] Weather station dew point'),
+                ('ENVDIR', self.wind_direction(unit_out=units.deg).value, '[deg] Weather station wind direction'),
+                ('METDEW', self.dew_point(unit_out=units.deg_C).value, '[degC] Weather station dew point'),
                 ('ENVPRE', self.pressure(unit_out=units.cds.mmHg).value, '[mmHg] Weather station air pressure'),
                 # ('METRAIN', str(self.pressure()), 'Weather station rain indicator'),
                 ('ENVDAT', self.obs_time(), 'Date of the meteo observation')  # FIXME: Must be UTC time.
