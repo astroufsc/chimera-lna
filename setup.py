@@ -10,5 +10,7 @@ setup(
     author='William Schoenell',
     author_email='william@iaa.es',
     install_requires=['pyserial'],
+    package_data={'chimera_lna': ['data/dome_model.csv']},
+    include_package_data=True,
     description='Chimera plugin for LNA domes'
 )
