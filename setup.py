@@ -3,7 +3,7 @@ from distutils.core import setup
 setup(
     name='chimera-lna',
     version='0.0.1',
-    packages=['chimera_lna', 'chimera_lna.instruments'],
+    packages=['chimera_lna', 'chimera_lna.instruments', 'chimera_lna.util'],
     scripts=[],
     url='http://github.com/astroufsc/chimera-lna',
     license='GPL v2',

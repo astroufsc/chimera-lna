@@ -1,13 +1,13 @@
+import math
 import os
 import threading
 import time
-import math
 
 from chimera.core import SYSTEM_CONFIG_DIRECTORY
 from chimera.core.exceptions import ChimeraException, ObjectNotFoundException
 from chimera.core.lock import lock
 from chimera.interfaces.dome import InvalidDomePositionException, DomeStatus, Style
-from chimera.util.coord import Coord, CoordUtil
+from chimera.util.coord import Coord
 
 from chimera_lna.util.lookup_table import DomeLookupTable
 
