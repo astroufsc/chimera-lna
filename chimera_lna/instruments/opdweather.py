@@ -3,16 +3,15 @@ import re
 import urllib2
 import time
 import datetime
-
 from astropy import units
 from chimera.core.exceptions import OptionConversionException
 from chimera.core.lock import lock
 from chimera.instruments.weatherstation import WeatherBase
-from chimera.interfaces.weatherstation import WSValue
+from chimera.interfaces.weatherstation import WSValue, WeatherTemperature, WeatherHumidity, WeatherPressure, WeatherWind
 import numpy as np
 
 
-class OpdWeather(WeatherBase):
+class OpdWeather(WeatherBase, WeatherTemperature, WeatherHumidity, WeatherPressure, WeatherWind):
     __config__ = {"model": "OPD 1.60m telescope weather station",
                   "check_interval": 3 * 60,  # in seconds
                   "uri": "http://200.131.64.185/clima/download.txt",
