@@ -4,7 +4,7 @@ import threading
 import time
 
 from chimera.core import SYSTEM_CONFIG_DIRECTORY
-from chimera.core.exceptions import ChimeraException, ObjectNotFoundException
+from chimera.core.exceptions import ChimeraException
 from chimera.core.lock import lock
 from chimera.interfaces.dome import InvalidDomePositionException, DomeStatus, Style
 from chimera.util.coord import Coord
@@ -68,14 +68,13 @@ class DomeLNA(DomeBase):
 
     def __start__(self):
         self._open()
-        self._site = self.getSite()
         return super(DomeLNA, self).__start__()
 
     def _open(self):
         # Open the serial Port.
         self._serial = serial.Serial(self["device"], baudrate=9600, timeout=self._serial_timeout)
         # On start, reset the dome.
-        self._resetDome()
+        self._resetDome(reset_tag=900)
         # Get the dome azimuth just to move it to the init position if needed.
         self.getAz()
         # # Check if connection is okay.
@@ -97,12 +96,12 @@ class DomeLNA(DomeBase):
                 ack = self._command("MEADE PROG RESET")
                 time.sleep(2)
 
-        if reset_tag:
+        if reset_tag is not None:
             # When resetting the dome, move it to the reset_tag
             ack = self._command("MEADE DOMO MOVER = %03d" % reset_tag)
             if not ack.startswith('ACK'):
-                    ack = self._command("MEADE DOMO MOVER = %03d" % reset_tag)
-                    time.sleep(2)
+                ack = self._command("MEADE DOMO MOVER = %03d" % reset_tag)
+                time.sleep(2)
 
             # Try to move the dome again
             t0 = time.time()
@@ -113,7 +112,6 @@ class DomeLNA(DomeBase):
                 time.sleep(1)
         else:
             return
-
 
     def _checkIdle(self):
         ack = self._command("MEADE PROG STATUS")
@@ -160,17 +158,6 @@ class DomeLNA(DomeBase):
         self._debug("[read ] '%s'" % repr(ack).replace("'", ""))
         return ack.replace('\r', '')
 
-    # utilitaries
-    def getSite(self):
-        try:
-            p = self.getManager().getProxy('/Site/0', lazy=True)
-            if not p.ping():
-                return False
-            else:
-                return p
-        except ObjectNotFoundException:
-            return False
-
     @lock
     def lightsOn(self):
         return 'ACK' in self._command("MEADE FLAT_WEAK LIGAR")
@@ -192,7 +179,10 @@ class DomeLNA(DomeBase):
 
     @lock
     def closeSlit(self):
-        return 'ACK' in self._command("MEADE TRAPEIRA FECHAR")
+        ack = 'ACK' in self._command("MEADE TRAPEIRA FECHAR")
+        if ack:
+            self._slitOpen = False
+        return ack
 
     def _getTag(self):
         ack = self._command("MEADE PROG STATUS")[8:11]
@@ -221,18 +211,13 @@ class DomeLNA(DomeBase):
 
         return Coord.fromD(az)
 
+    @lock
     def _init_dome(self):
         self._debug('Initializing dome...')
-        self._initalizing = True
-        self.slewToAz(self._init_az)
+        self._resetDome(reset_tag=900)
 
     @lock
     def slewToAz(self, az):
-        # If dome is already in position within an margin, do noting.
-        if not self._initalizing:  # FIXME
-            self.log.debug('Skipping slewToAz')
-            return True
-
         # Dome is formed of tags with numbers from 801 to 982 (0 to 360 degress) where 801 is placed in the degree 270.
         if az > 360:
             raise InvalidDomePositionException("Cannot slew to %s. Outside azimuth limits." % az)
@@ -243,9 +228,11 @@ class DomeLNA(DomeBase):
 
         # Calculate the dome azimuth offset.
         tel = self.getTelescope()
-        site = self.getSite()
-        if not tel or not site:
-            self.log.error("I need a telescope and a site to calculate the dome offsets! Not doing it.")
+        if not tel or tel.isParked():
+            if tel.isParked():
+                self.log.debug("Telescope parked. Not using the dome lookup table.")
+            if not tel:
+                self.log.error("I need to know the telescope position to use the lookup table!")
             if az >= 270:
                 dome_tag = int(math.ceil((az - 270) / 2. + 801))
             else:
@@ -313,7 +300,7 @@ class DomeLNA(DomeBase):
                 ack = ''
                 for i in range(self._restart_tries):
                     if not ack.startswith('ACK'):
-                        self._command("MEADE DOMO MOVER = %03d" % dome_tag)
+                        ack = self._command("MEADE DOMO MOVER = %03d" % dome_tag)
                         time.sleep(2)
 
                 # Try to move the dome again
@@ -327,19 +314,3 @@ class DomeLNA(DomeBase):
 
     def isSlewing(self):
         return not self._checkIdle()
-
-
-if __name__ == '__main__':
-    d = DomeLNA()
-    d["device"] = "COM3"
-    d._open()
-    time.sleep(2)
-    for c in ["MEADE PROG PARAR", "MEADE PROG RESET", "MEADE PROG STATUS"]:
-        print "running '%s' command on dome" % c
-        print d._command(c)
-        time.sleep(2)
-    print("Checking dome status: (False = idle, True = not idle)")
-    print(d._checkIdle())
-    d._close()
-    print 'Finished.'
-
