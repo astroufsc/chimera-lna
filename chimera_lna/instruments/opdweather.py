@@ -86,17 +86,20 @@ class OpdWeather(WeatherBase, WeatherTemperature, WeatherHumidity, WeatherPressu
             except TypeError:
                 return False
             # TODO: check date and time.
-            self._date_ws = date_ws
-            self._time_ws = time_ws
-            self._temperature = np.float(temp_out)
-            self._humidity = np.float(hum_out)
-            self._dew_point = np.float(dew_point)
-            self._wind_speed = np.float(wind_speed)
-            self._wind_dir = self._wind_direction(wind_dir)
-            self._pressure = np.float(pressure)
-            self._rain = np.float(rain)
-            self._last_check = time.time()
-            return True
+            try:
+                self._date_ws = date_ws
+                self._time_ws = time_ws
+                self._temperature = np.float(temp_out)
+                self._humidity = np.float(hum_out)
+                self._dew_point = np.float(dew_point)
+                self._wind_speed = np.float(wind_speed)
+                self._wind_dir = self._wind_direction(wind_dir)
+                self._pressure = np.float(pressure)
+                self._rain = np.float(rain)
+                self._last_check = time.time()
+                return True
+            except ValueError:  # Sometimes the data returned from WS is "---". I will ingore it.
+                return False
         else:
             return True
 
@@ -110,8 +113,7 @@ class OpdWeather(WeatherBase, WeatherTemperature, WeatherHumidity, WeatherPressu
         dt = datetime.datetime(int('20' + y), int(m), int(d), int(hour), int(min)) - (
             datetime.datetime.now() - datetime.datetime.utcnow())
 
-        # return dt.strftime("%Y-%m-%dT%H:%M:%S.%f")
-        return dt.strftime("%Y-%m-%dT%H:%M:%S.%f")
+        return dt
 
     def humidity(self, unit_out=units.pct):
 
@@ -179,7 +181,7 @@ class OpdWeather(WeatherBase, WeatherTemperature, WeatherHumidity, WeatherPressu
                 ('METDEW', self.dew_point(unit_out=units.deg_C).value, '[degC] Weather station dew point'),
                 ('ENVPRE', self.pressure(unit_out=units.cds.mmHg).value, '[mmHg] Weather station air pressure'),
                 # ('METRAIN', str(self.pressure()), 'Weather station rain indicator'),
-                ('ENVDAT', self.obs_time(), 'Date of the meteo observation')  # FIXME: Must be UTC time.
+                ('ENVDAT', self.obs_time().strftime("%Y-%m-%dT%H:%M:%S.%f"), 'Date of the meteo observation')  # FIXME: Must be UTC time.
                 ]
 
 
