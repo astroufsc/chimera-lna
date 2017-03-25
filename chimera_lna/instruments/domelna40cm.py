@@ -49,8 +49,10 @@ class DomeLNA40cm(DomeBase):
         self._num_restarts = 0
         self._max_restarts = 3
 
+        self._max_status_tries = 60  # ~ 6 seconds
+
         # park position
-        self._azPark = 106
+        self["park_position"] = 106  # degrees
 
         # debug log
         self._debugLog = None
@@ -76,7 +78,7 @@ class DomeLNA40cm(DomeBase):
 
         # NOTE: Here is the opposite, call super first and then close
 
-        ret = super(DomeLNA40cm, self).__start__()
+        ret = super(DomeLNA40cm, self).__stop__()
         if not ret:
             return ret
 
@@ -87,20 +89,28 @@ class DomeLNA40cm(DomeBase):
     def _checkIdle(self):
 
         self.tty.setTimeout(0.3)
-        self._write("MEADE PROG STATUS")  # Ask for system status
 
-        ack = self._readline()
-        if not ack.startswith("    "):
-            time.sleep(0.3)
-            # try again
+        n_tries = 1
+        while True:
             self._write("MEADE PROG STATUS")  # Ask for system status
+            time.sleep(0.5)
             ack = self._readline()
-            if not ack.startswith("    "):
-                self.log.warning("Error, restarting Dome.")
+            self.log.debug("Dome ack: '%s'" % ack)
+            if ack.startswith("    "):
+                if ack[16] == '1':  # if '1', system busy
+                    self.log.debug("Dome is busy.")
+                    return False
+                else:
+                    return True
+            elif n_tries > self._max_status_tries:
+                self.log.error("Error reading dome status, restarting Dome.")
                 self._restartDome()
                 return False
+            self.log.debug("Dome not ready. Try %02d" % n_tries)
+            n_tries += 1
+            time.sleep(0.5)
 
-        if ack[16] == '1':  # if '1', system busy
+        if ack[16] == '1':
             return False
 
         return True
@@ -116,7 +126,7 @@ class DomeLNA40cm(DomeBase):
         self.log.info("Trying to restart the Dome.")
 
         self._write("MEADE PROG PARAR")
-        ack = self._readline()
+        self._readline()
         time.sleep(1)
 
         self._write("MEADE PROG RESET")  # Restart Command
@@ -134,13 +144,6 @@ class DomeLNA40cm(DomeBase):
         return True
 
     @lock
-    def park(self):
-        '''
-        Parks the dome to its park position
-        '''
-        self.slewToAz(self._azPark)
-
-    @lock
     def open(self):
 
         self.tty = serial.Serial(self["device"], baudrate=9600,
@@ -148,10 +151,12 @@ class DomeLNA40cm(DomeBase):
                                  parity=serial.PARITY_NONE,
                                  stopbits=serial.STOPBITS_ONE,
                                  timeout=self["init_timeout"],
-                                 xonxoff=0, rtscts=0)
+                                 xonxoff=1, rtscts=0)
 
         self.tty.flushInput()
         self.tty.flushOutput()
+
+        self._restartDome()
 
         self._checkIdle()
 
@@ -163,9 +168,15 @@ class DomeLNA40cm(DomeBase):
     @lock
     def slewToAz(self, az):
 
-        if not self._checkIdle():  # Verify if dome is idle
-            self.log.warning("Error, Dome busy.")
-            return
+        i = 0
+        while not self._checkIdle():  # Verify if dome is idle
+            i += 1
+            if i < self._max_status_tries:
+                self.log.warning("Error, Dome busy. Try %02i." % i)
+                time.sleep(1)
+            else:
+                self._restartDome()
+                return
 
         if not isinstance(az, Coord):
             az = Coord.fromDMS(az)
@@ -186,22 +197,29 @@ class DomeLNA40cm(DomeBase):
 
         pstn = "MEADE DOMO MOVER = %03d" % dome_az
 
-        self._write(pstn)
+        i = 0
+        while i < self._max_status_tries:
+            i += 1
+            self._write(pstn)
+            time.sleep(1)
+            ack = self._readline()
 
-        ack = self._readline()
+            if not ack.startswith("ACK"):
+                self.log.error("Error trying to slew the dome to azimuth '%s' (dome azimuth '%s'). Try: %02i" % (az, dome_az, i))
+                if i == self._max_status_tries:
+                    self._restartDome()
+                    raise ChimeraException("Error trying to slew the dome to azimuth '%s' (dome azimuth '%s'). Dome restarted." % (az, dome_az))
+            else:
+                return
 
-        if ack != "ACK":
-            raise IOError("Error trying to slew the dome to"
-                          "azimuth '%s' (dome azimuth '%s')." % (az, dome_az))
-
-        # ok, we are slewing now
-        self._slewing = True
-        self.slewBegin(az)
+            # ok, we are slewing now
+            self._slewing = True
+            self.slewBegin(az)
 
         # FIXME: add abort option here
 
-        for x in range(120):  # Tries 120 times
-            time.sleep(0.5)  # Total of 60 seconds waiting
+        for x in range(200):  # Total of 60 seconds waiting
+            time.sleep(0.5)
             if self._checkIdle():
                 self._slewing = False
                 self.slewComplete(self.getAz(), DomeStatus.OK)
@@ -235,8 +253,6 @@ class DomeLNA40cm(DomeBase):
             self.log.warning("Error, Dome busy.")
             return
 
-        self.tty.setTimeout(10)
-
         cmd = "MEADE PROG STATUS"
 
         self._write(cmd)
@@ -268,8 +284,6 @@ class DomeLNA40cm(DomeBase):
         az -= self._az_shift
         az %= 360
 
-        az += 4  # Ugly bugfixing for a dome in the dome controller.
-
         return Coord.fromDMS(az)
 
     @lock
@@ -288,12 +302,12 @@ class DomeLNA40cm(DomeBase):
         if ack != "ACK":
             raise IOError("Error trying to open the slit.")
 
-        for x in range(10):  # Tries 10 times
-            time.sleep(0.3)
+        for x in range(30):  # Tries 3 seconds
             if self._checkIdle():
                 self._slitOpen = True
                 # self.slitOpened(self.getAz())
                 return
+            time.sleep(1.5)
 
         if not self._checkIdle():
             self.log.warning("Error, restarting Dome.")
@@ -301,9 +315,6 @@ class DomeLNA40cm(DomeBase):
 
     @lock
     def closeSlit(self):
-
-        # Before closing the dome, park it to its park position.
-        self.park()
 
         if not self._checkIdle():  # Verify if dome is idle
             self.log.warning("Error, Dome busy.")
@@ -318,12 +329,12 @@ class DomeLNA40cm(DomeBase):
         if ack != "ACK":
             raise IOError("Error trying to close the slit.")
 
-        for x in range(10):  # Tries 10 times
-            time.sleep(0.3)
+        for x in range(30):  # Tries 30 seconds
             if self._checkIdle():
                 self._slitOpen = False
                 # self.slitClosed(self.getAz())
                 return
+            time.sleep(1.5)
 
         if not self._checkIdle():
             self.log.warning("Error, restarting Dome.")
@@ -385,7 +396,7 @@ class DomeLNA40cm(DomeBase):
         if not self.tty.isOpen():
             raise IOError("Device not open")
 
-        self.tty.flushInput()
+        # self.tty.flushInput()
 
         try:
             ret = self.tty.readline()  #None, eol)
@@ -408,19 +419,13 @@ class DomeLNA40cm(DomeBase):
 
         return True
 
-    def _busy_wait(self, n):
-        t0 = time.time()
-        i = 0
-        while i < n:
-            i += 1
-
     def _write(self, data, eol="\r"):
         if not self.tty.isOpen():
             raise IOError("Device not open")
 
         self.tty.flushOutput()
 
-        self._busy_wait(1e6)
+        time.sleep(1.5)
 
         self._debug("[write] '%s%s'" % (repr(data).replace("'", ""), repr(eol).replace("'", "")))
         ret = self.tty.write("%s%s" % (data, eol))
