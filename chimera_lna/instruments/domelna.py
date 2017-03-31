@@ -240,9 +240,9 @@ class DomeLNA(DomeBase, LampBase):
 
         # Calculate the dome azimuth offset.
         tel = self.getTelescope()
-        if not tel or tel.isTracking():
-            if tel.isTracking():
-                self.log.debug("Telescope parked. Not using the dome lookup table.")
+        if not tel or not tel.isTracking():
+            if not tel.isTracking():
+                self.log.debug("Telescope is not Tracking. Ignoring the dome lookup table.")
             if not tel:
                 self.log.error("I need to know the telescope position to use the lookup table!")
             if az >= 270:
