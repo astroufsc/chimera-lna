@@ -6,6 +6,7 @@ import time
 from chimera.core import SYSTEM_CONFIG_DIRECTORY
 from chimera.core.exceptions import ChimeraException
 from chimera.core.lock import lock
+from chimera.instruments.lamp import LampBase
 from chimera.interfaces.dome import InvalidDomePositionException, DomeStatus, Style
 from chimera.util.coord import Coord
 
@@ -23,11 +24,13 @@ class DomeSlewTimeoutException(ChimeraException):
     '''
 
 
-class DomeLNA(DomeBase):
+class DomeLNA(DomeBase, LampBase):
     def __init__(self):
         DomeBase.__init__(self)
+        LampBase.__init__(self)
 
         # Model, name, etc...
+        self._light_on = False
         self["model"] = "COTE/LNA custom dome"
         self["style"] = Style.Classic
         # self["park_position"] = 108
@@ -159,12 +162,19 @@ class DomeLNA(DomeBase):
         return ack.replace('\r', '')
 
     @lock
-    def lightsOn(self):
-        return 'ACK' in self._command("MEADE FLAT_WEAK LIGAR")
+    def switchOn(self):
+        ret = 'ACK' in self._command("MEADE FLAT_WEAK LIGAR")
+        self._light_on = ret
+        return ret
 
     @lock
-    def lightsOff(self):
-        return 'ACK' in self._command("MEADE FLAT_WEAK DESLIGAR")
+    def switchOff(self):
+        ret = 'ACK' in self._command("MEADE FLAT_WEAK DESLIGAR")
+        self._light_on = not ret
+        return ret
+    
+    def isSwitchedOn(self):
+        return self._light_on
 
     def isSlitOpen(self):
         # FIXME: bool(self._command("MEADE PROG STATUS")[19])
