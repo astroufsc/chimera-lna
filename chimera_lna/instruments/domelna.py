@@ -164,13 +164,15 @@ class DomeLNA(DomeBase, LampBase):
     @lock
     def switchOn(self):
         ret = 'ACK' in self._command("MEADE FLAT_WEAK LIGAR")
-        self._light_on = ret
+        if ret:
+            self._light_on = True
         return ret
 
     @lock
     def switchOff(self):
         ret = 'ACK' in self._command("MEADE FLAT_WEAK DESLIGAR")
-        self._light_on = not ret
+        if ret:
+            self._light_on = False
         return ret
     
     def isSwitchedOn(self):
