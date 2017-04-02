@@ -120,48 +120,36 @@ class OpdWeather(WeatherBase, WeatherTemperature, WeatherHumidity, WeatherPressu
         if unit_out not in self.__accepted_humidity_units__:
             raise OptionConversionException("Invalid humidity unit %s." % unit_out)
 
-        if self._check():
-            return WSValue(self.obs_time(), self._convert_units(self._humidity, units.pct, unit_out), unit_out)
-        else:
-            return False
+        self._check()
+        return WSValue(self.obs_time(), self._convert_units(self._humidity, units.pct, unit_out), unit_out)
 
     def temperature(self, unit_out=units.Celsius):
 
         if unit_out not in self.__accepted_temperature_units__:
             raise OptionConversionException("Invalid temperature unit %s." % unit_out)
 
-        if self._check():
-            return WSValue(self.obs_time(), self._convert_units(self._temperature, units.Celsius, unit_out), unit_out)
-        else:
-            return False
+        self._check()
+        return WSValue(self.obs_time(), self._convert_units(self._temperature, units.Celsius, unit_out), unit_out)
 
     def wind_speed(self, unit_out=units.meter / units.second):
 
-        if self._check():
-            return WSValue(self.obs_time(), self._convert_units(self._wind_speed, (units.km / units.h), unit_out),
-                           unit_out)
-        else:
-            return False
+        self._check()
+        return WSValue(self.obs_time(), self._convert_units(self._wind_speed, (units.km / units.h), unit_out),
+                       unit_out)
 
     def wind_direction(self, unit_out=units.degree):
 
-        if self._check():
-            return WSValue(self.obs_time(), self._convert_units(self._wind_dir, units.deg, unit_out), unit_out)
-        else:
-            return False
+        self._check()
+        return WSValue(self.obs_time(), self._convert_units(self._wind_dir, units.deg, unit_out), unit_out)
 
     def dew_point(self, unit_out=units.Celsius):
 
-        if self._check():
-            return WSValue(self.obs_time(), self._convert_units(self._dew_point, units.deg_C, unit_out), unit_out)
-        else:
-            return False
+        self._check()
+        return WSValue(self.obs_time(), self._convert_units(self._dew_point, units.deg_C, unit_out), unit_out)
 
     def pressure(self, unit_out=units.Pa):
-        if self._check():
-            return WSValue(self.obs_time(), self._convert_units(self._pressure, units.bar / 1000, unit_out), unit_out)
-        else:
-            return False
+        self._check()
+        return WSValue(self.obs_time(), self._convert_units(self._pressure, units.bar / 1000, unit_out), unit_out)
 
     # def rain(self, deltaT=0, unit=Unit.MM_PER_H):
     #     # TODO: FIXME. Check rain units.
