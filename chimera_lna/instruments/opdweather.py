@@ -1,14 +1,15 @@
+import datetime
 import logging
 import re
-import urllib2
 import time
-import datetime
+import urllib2
+
+import numpy as np
 from astropy import units
 from chimera.core.exceptions import OptionConversionException
 from chimera.core.lock import lock
 from chimera.instruments.weatherstation import WeatherBase
 from chimera.interfaces.weatherstation import WSValue, WeatherTemperature, WeatherHumidity, WeatherPressure, WeatherWind
-import numpy as np
 
 
 class OpdWeather(WeatherBase, WeatherTemperature, WeatherHumidity, WeatherPressure, WeatherWind):
@@ -45,6 +46,8 @@ class OpdWeather(WeatherBase, WeatherTemperature, WeatherHumidity, WeatherPressu
         self._angles = np.arange(0, 360, 360. / len(self._directions))
         self._directions = np.append(self._directions, ["---"])
         self._angles = np.append(self._angles, [0])
+
+        self.setHz(1 / float(self["check_interval"]))
 
     def __start__(self):
         # self.setHz(self.__config__["check_interval"])
@@ -103,6 +106,11 @@ class OpdWeather(WeatherBase, WeatherTemperature, WeatherHumidity, WeatherPressu
         else:
             return True
 
+    def control(self):
+        self._check()
+
+        return True
+
     def obs_time(self):
         ''' Returns a string with local date/time of the meteorological observation
         '''
@@ -120,7 +128,6 @@ class OpdWeather(WeatherBase, WeatherTemperature, WeatherHumidity, WeatherPressu
         if unit_out not in self.__accepted_humidity_units__:
             raise OptionConversionException("Invalid humidity unit %s." % unit_out)
 
-        self._check()
         return WSValue(self.obs_time(), self._convert_units(self._humidity, units.pct, unit_out), unit_out)
 
     def temperature(self, unit_out=units.Celsius):
@@ -128,34 +135,25 @@ class OpdWeather(WeatherBase, WeatherTemperature, WeatherHumidity, WeatherPressu
         if unit_out not in self.__accepted_temperature_units__:
             raise OptionConversionException("Invalid temperature unit %s." % unit_out)
 
-        self._check()
         return WSValue(self.obs_time(), self._convert_units(self._temperature, units.Celsius, unit_out), unit_out)
 
     def wind_speed(self, unit_out=units.meter / units.second):
-
-        self._check()
         return WSValue(self.obs_time(), self._convert_units(self._wind_speed, (units.km / units.h), unit_out),
                        unit_out)
 
     def wind_direction(self, unit_out=units.degree):
-
-        self._check()
         return WSValue(self.obs_time(), self._convert_units(self._wind_dir, units.deg, unit_out), unit_out)
 
     def dew_point(self, unit_out=units.Celsius):
-
-        self._check()
         return WSValue(self.obs_time(), self._convert_units(self._dew_point, units.deg_C, unit_out), unit_out)
 
     def pressure(self, unit_out=units.Pa):
-        self._check()
         return WSValue(self.obs_time(), self._convert_units(self._pressure, units.bar / 1000, unit_out), unit_out)
 
     # def rain(self, deltaT=0, unit=Unit.MM_PER_H):
     #     # TODO: FIXME. Check rain units.
     #     if unit != Unit.MM_PER_H:
     #         return NotImplementedError()
-    #     # self._check()
     #     # return self._temperature
     #     return NotImplementedError()
 
