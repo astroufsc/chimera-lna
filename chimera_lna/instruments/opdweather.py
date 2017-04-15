@@ -63,7 +63,8 @@ class OpdWeather(WeatherBase, WeatherTemperature, WeatherHumidity, WeatherPressu
 
         self.log.info("Querying OPD meteo station...")
         try:
-            url = urllib2.urlopen(uri)
+            url = urllib2.urlopen(urllib2.Request("http://200.131.64.185/clima/download.txt",
+                                                  headers={'Range': 'bytes=-300'}))
         except urllib2.URLError, e:
             self.log.error('Error opening url %s: %s' % (uri, e))
             return False
@@ -167,7 +168,7 @@ class OpdWeather(WeatherBase, WeatherTemperature, WeatherHumidity, WeatherPressu
                 ('METDEW', self.dew_point(unit_out=units.deg_C).value, '[degC] Weather station dew point'),
                 ('ENVPRE', self.pressure(unit_out=units.cds.mmHg).value, '[mmHg] Weather station air pressure'),
                 # ('METRAIN', str(self.pressure()), 'Weather station rain indicator'),
-                ('ENVDAT', self.obs_time().strftime("%Y-%m-%dT%H:%M:%S.%f"), 'Date of the meteo observation')  # FIXME: Must be UTC time.
+                ('ENVDAT', self.obs_time().strftime("%Y-%m-%dT%H:%M:%S.%f"), 'Date of the meteo observation')
                 ]
 
 
