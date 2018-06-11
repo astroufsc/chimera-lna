@@ -184,6 +184,7 @@ class DomeLNA(DomeBase, LampBase):
 
     @lock
     def openSlit(self):
+        self.log.debug("Opening dome slit.")
         ack = 'ACK' in self._command("MEADE TRAPEIRA ABRIR")
         if ack:
             self._slitOpen = True
@@ -191,6 +192,7 @@ class DomeLNA(DomeBase, LampBase):
 
     @lock
     def closeSlit(self):
+        self.log.debug("Closing dome slit.")
         ack = 'ACK' in self._command("MEADE TRAPEIRA FECHAR")
         if ack:
             self._slitOpen = False
@@ -331,3 +333,21 @@ class DomeLNA(DomeBase, LampBase):
 
     def isSlewing(self):
         return not self._checkIdle()
+
+
+def getMetadata(self, request):
+    # Check first if there is metadata from an metadata override method.
+    md = self.getMetadataOverride(request)
+    if md is not None:
+        return md
+    # If not, just go on with the instrument's default metadata.
+    if self.isSlitOpen():
+        slit = 'Open'
+    else:
+        slit = 'Closed'
+
+    return [('DOME_MDL', str(self['model']), 'Dome Model'),
+            ('DOME_TYP', str(self['style']), 'Dome Type'),
+            ('DOME_TRK', str(self['mode']), 'Dome Tracking/Standing'),
+            ('DOME_AZ', str(self.getAz()), 'Dome Azimuth'),
+            ('DOME_SLT', str(slit), 'Dome slit status')]
