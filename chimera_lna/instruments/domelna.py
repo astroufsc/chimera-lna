@@ -321,6 +321,11 @@ class DomeLNA(DomeBase, LampBase):
                         self.log.debug("Timeout moving the dome")
                     time.sleep(1)
 
+    def track(self):
+        super(DomeBase, self).track()
+        self.log.debug("Sleeping 15s after tracking enabled...")
+        time.sleep(15)
+
     def abortSlew(self):
         return NotImplementedError()
 
