@@ -7,21 +7,21 @@ from chimera.core import SYSTEM_CONFIG_DIRECTORY
 from chimera.core.exceptions import ChimeraException
 from chimera.core.lock import lock
 from chimera.instruments.lamp import LampBase
-from chimera.interfaces.dome import InvalidDomePositionException, DomeStatus, Style
+from chimera.interfaces.dome import DomeStatus, InvalidDomePositionException, Style
 from chimera.util.coord import Coord
 
 from chimera_lna.util.lookup_table import DomeLookupTable
 
-__author__ = 'william'
+__author__ = "william"
 
 import serial
 from chimera.instruments.dome import DomeBase
 
 
 class DomeSlewTimeoutException(ChimeraException):
-    '''
+    """
     Raised when dome times out when slewing.
-    '''
+    """
 
 
 class DomeLNA(DomeBase, LampBase):
@@ -65,17 +65,21 @@ class DomeLNA(DomeBase, LampBase):
         # Debug file
         self._debugLog = None
         try:
-            self._debugLog = open(os.path.join(SYSTEM_CONFIG_DIRECTORY, "dome-debug.log"), "w")
-        except IOError, e:
-            self.log.warning("Could not create dome debug file (%s)" % str(e))
+            self._debugLog = open(
+                os.path.join(SYSTEM_CONFIG_DIRECTORY, "dome-debug.log"), "w"
+            )
+        except OSError as e:
+            self.log.warning(f"Could not create dome debug file ({str(e)})")
 
     def __start__(self):
         self._open()
-        return super(DomeLNA, self).__start__()
+        return super().__start__()
 
     def _open(self):
         # Open the serial Port.
-        self._serial = serial.Serial(self["device"], baudrate=9600, timeout=self._serial_timeout)
+        self._serial = serial.Serial(
+            self["device"], baudrate=9600, timeout=self._serial_timeout
+        )
         # On start, reset the dome.
         self._resetDome(reset_tag=900)
         # Get the dome azimuth just to move it to the init position if needed.
@@ -86,23 +90,23 @@ class DomeLNA(DomeBase, LampBase):
     def _resetDome(self, reset_tag=None):
         self._serial.flushInput()
         self._serial.flushOutput()
-        ack = ''
+        ack = ""
         # Reset the queue.
         for i in range(self._restart_tries):
-            if not ack.startswith('ACK'):
+            if not ack.startswith("ACK"):
                 ack = self._command("MEADE PROG PARAR")
                 time.sleep(2)
         # Restart controller
-        ack = ''
+        ack = ""
         for i in range(self._restart_tries):
-            if not ack.startswith('ACK'):
+            if not ack.startswith("ACK"):
                 ack = self._command("MEADE PROG RESET")
                 time.sleep(2)
 
         if reset_tag is not None:
             # When resetting the dome, move it to the reset_tag
             ack = self._command("MEADE DOMO MOVER = %03d" % reset_tag)
-            if not ack.startswith('ACK'):
+            if not ack.startswith("ACK"):
                 ack = self._command("MEADE DOMO MOVER = %03d" % reset_tag)
                 time.sleep(2)
 
@@ -118,13 +122,13 @@ class DomeLNA(DomeBase, LampBase):
 
     def _checkIdle(self):
         ack = self._command("MEADE PROG STATUS")
-        if ack.startswith('NAK'):
-            self.log.debug('Got a NAK on status.')
+        if ack.startswith("NAK"):
+            self.log.debug("Got a NAK on status.")
             # self._resetDome()
             return False
         if len(ack) < 17:  # Sometimes ack is shit. So, return that dome is busy.
             return False
-        if ack[16] == '1':  # if '1', system busy
+        if ack[16] == "1":  # if '1', system busy
             return False
         else:
             return True
@@ -139,42 +143,47 @@ class DomeLNA(DomeBase, LampBase):
 
     def _debug(self, msg):
         if self._debugLog:
-            print >> self._debugLog, time.time(), threading.currentThread().getName(), msg
+            print(
+                time.time(),
+                threading.currentThread().getName(),
+                msg,
+                file=self._debugLog,
+            )
             self._debugLog.flush()
 
     def _command(self, cmd):
         self._serial.flushOutput()
         self._serial.flushInput()
-        self._debug("[write] '%s'" % cmd)
-        self._serial.write('%s\r' % cmd)
+        self._debug(f"[write] '{cmd}'")
+        self._serial.write(f"{cmd}\r")
         t0 = time.time()
-        ack = ''
-        while '\r' not in ack:
+        ack = ""
+        while "\r" not in ack:
             ack += self._serial.read()
-            time.sleep(.1)
+            time.sleep(0.1)
             if (time.time() - t0) > self._serial_timeout:
-                self.log.debug('Error reading serial... Trying to flush it.')
+                self.log.debug("Error reading serial... Trying to flush it.")
                 self._serial.flushInput()
                 self._serial.flushOutput()
-                self._debug("[read ] flush - '%s'" % repr(ack).replace("'", ""))
-                return ack.replace('\r', '')
-        self._debug("[read ] '%s'" % repr(ack).replace("'", ""))
-        return ack.replace('\r', '')
+                self._debug("[read ] flush - '{}'".format(repr(ack).replace("'", "")))
+                return ack.replace("\r", "")
+        self._debug("[read ] '{}'".format(repr(ack).replace("'", "")))
+        return ack.replace("\r", "")
 
     @lock
     def switchOn(self):
-        ret = 'ACK' in self._command("MEADE FLAT_WEAK LIGAR")
+        ret = "ACK" in self._command("MEADE FLAT_WEAK LIGAR")
         if ret:
             self._light_on = True
         return ret
 
     @lock
     def switchOff(self):
-        ret = 'ACK' in self._command("MEADE FLAT_WEAK DESLIGAR")
+        ret = "ACK" in self._command("MEADE FLAT_WEAK DESLIGAR")
         if ret:
             self._light_on = False
         return ret
-    
+
     def isSwitchedOn(self):
         return self._light_on
 
@@ -185,7 +194,7 @@ class DomeLNA(DomeBase, LampBase):
     @lock
     def openSlit(self):
         self.log.debug("Opening dome slit.")
-        ack = 'ACK' in self._command("MEADE TRAPEIRA ABRIR")
+        ack = "ACK" in self._command("MEADE TRAPEIRA ABRIR")
         if ack:
             self._slitOpen = True
         return ack
@@ -193,14 +202,14 @@ class DomeLNA(DomeBase, LampBase):
     @lock
     def closeSlit(self):
         self.log.debug("Closing dome slit.")
-        ack = 'ACK' in self._command("MEADE TRAPEIRA FECHAR")
+        ack = "ACK" in self._command("MEADE TRAPEIRA FECHAR")
         if ack:
             self._slitOpen = False
         return ack
 
     def _getTag(self):
         ack = self._command("MEADE PROG STATUS")[8:11]
-        if ack == '   ':
+        if ack == "   ":
             self.log.info("Initializing dome...")
             self._init_dome()
             time.sleep(1)
@@ -223,18 +232,20 @@ class DomeLNA(DomeBase, LampBase):
         else:  # 0 to 270 deg
             az = (ack - 846) * 2
 
-        return Coord.fromD(az)
+        return Coord.from_d(az)
 
     @lock
     def _init_dome(self):
-        self._debug('Initializing dome...')
+        self._debug("Initializing dome...")
         self._resetDome(reset_tag=900)
 
     @lock
     def slewToAz(self, az):
         # Dome is formed of tags with numbers from 801 to 982 (0 to 360 degress) where 801 is placed in the degree 270.
         if az > 360:
-            raise InvalidDomePositionException("Cannot slew to %s. Outside azimuth limits." % az)
+            raise InvalidDomePositionException(
+                f"Cannot slew to {az}. Outside azimuth limits."
+            )
 
         # Stop any running tasks on dome controller.
         # self._command('MEADE PROG PARAR')
@@ -244,13 +255,17 @@ class DomeLNA(DomeBase, LampBase):
         tel = self.getTelescope()
         if not tel or not tel.isTracking():
             if not tel.isTracking():
-                self.log.debug("Telescope is not Tracking. Ignoring the dome lookup table.")
+                self.log.debug(
+                    "Telescope is not Tracking. Ignoring the dome lookup table."
+                )
             if not tel:
-                self.log.error("I need to know the telescope position to use the lookup table!")
+                self.log.error(
+                    "I need to know the telescope position to use the lookup table!"
+                )
             if az >= 270:
-                dome_tag = int(math.ceil((az - 270) / 2. + 801))
+                dome_tag = int(math.ceil((az - 270) / 2.0 + 801))
             else:
-                dome_tag = int(math.ceil(az / 2. + 846))
+                dome_tag = int(math.ceil(az / 2.0 + 846))
         else:
             dome_tag = self._lookup.get_tag_altaz(tel.getPositionAltAz())
             # Don't move if we are on the right position.
@@ -260,14 +275,14 @@ class DomeLNA(DomeBase, LampBase):
         # TODO: Abort point.
         # Run dome move command.
         # Works on the first try?
-        if 'ACK' in self._command("MEADE DOMO MOVER = %03d" % dome_tag):
+        if "ACK" in self._command("MEADE DOMO MOVER = %03d" % dome_tag):
             time.sleep(1)
         else:  # If not, reset the dome and try more few times...
             time.sleep(2)
             ack = self._command("MEADE DOMO MOVER = %03d" % dome_tag)
             for i_retry in range(self._restart_tries):
-                if not ack.startswith('ACK'):
-                    self.log.debug('No ACK from dome when trying to slew. Retrying...')
+                if not ack.startswith("ACK"):
+                    self.log.debug("No ACK from dome when trying to slew. Retrying...")
                     # Reset the dome.
                     reset_tag = dome_tag - 100
                     if reset_tag < 801:
@@ -303,7 +318,10 @@ class DomeLNA(DomeBase, LampBase):
 
             else:
 
-                self.log.debug('Dome position error >= %i. Restart dome try %i.' % (self._restart_precision, i_retry))
+                self.log.debug(
+                    "Dome position error >= %i. Restart dome try %i."
+                    % (self._restart_precision, i_retry)
+                )
 
                 # Reset the dome.
                 reset_tag = dome_tag - 100
@@ -311,9 +329,9 @@ class DomeLNA(DomeBase, LampBase):
                     reset_tag = 982 - (801 - reset_tag)
                 self._resetDome(reset_tag)
 
-                ack = ''
+                ack = ""
                 for i in range(self._restart_tries):
-                    if not ack.startswith('ACK'):
+                    if not ack.startswith("ACK"):
                         ack = self._command("MEADE DOMO MOVER = %03d" % dome_tag)
                         time.sleep(2)
 
@@ -342,12 +360,14 @@ def getMetadata(self, request):
         return md
     # If not, just go on with the instrument's default metadata.
     if self.isSlitOpen():
-        slit = 'Open'
+        slit = "Open"
     else:
-        slit = 'Closed'
+        slit = "Closed"
 
-    return [('DOME_MDL', str(self['model']), 'Dome Model'),
-            ('DOME_TYP', str(self['style']), 'Dome Type'),
-            ('DOME_TRK', str(self['mode']), 'Dome Tracking/Standing'),
-            ('DOME_AZ', str(self.getAz()), 'Dome Azimuth'),
-            ('DOME_SLT', str(slit), 'Dome slit status')]
+    return [
+        ("DOME_MDL", str(self["model"]), "Dome Model"),
+        ("DOME_TYP", str(self["style"]), "Dome Type"),
+        ("DOME_TRK", str(self["mode"]), "Dome Tracking/Standing"),
+        ("DOME_AZ", str(self.getAz()), "Dome Azimuth"),
+        ("DOME_SLT", str(slit), "Dome slit status"),
+    ]

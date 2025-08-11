@@ -1,4 +1,3 @@
-from __future__ import division
 import numpy as np
 
 # At LNA:
@@ -7,8 +6,10 @@ import numpy as np
 # r = 33 * np.cos((22+29)*np.pi/180.) -10  = 10.77 cm - From Paramount ME Manual
 # R = 147 cm - LNA dome.
 
+
 class CalcDomeException(Exception):
     pass
+
 
 def CalcDomeAz(ha, dec, phi, X, Y, Z, r, R):
     """
@@ -25,31 +26,33 @@ def CalcDomeAz(ha, dec, phi, X, Y, Z, r, R):
     :return dome_az: Corrected dome Azimuth in radians.
     """
 
-    print ('ha, dec, phi, X, Y, Z, r, R:', ha, dec, phi, X, Y, Z, r, R)
+    print(("ha, dec, phi, X, Y, Z, r, R:", ha, dec, phi, X, Y, Z, r, R))
 
     # Calculate position of the optical axis origin with respect to dome center.
 
-    x = X+r*np.cos(phi)*np.cos(ha)
-    y = Y-r*np.sin(phi)*np.sin(ha)
-    z = Z-r*np.cos(phi)*np.sin(ha)
+    x = X + r * np.cos(phi) * np.cos(ha)
+    y = Y - r * np.sin(phi) * np.sin(ha)
+    z = Z - r * np.cos(phi) * np.sin(ha)
 
     # unit vector with the direction of the optical axis (to the object)
-    obsPoleSign = 1. if phi > 0. else -1. # 1. if observatory is in the North pole, -1. if South
-    dang = (np.pi/2.+(obsPoleSign*dec))-(obsPoleSign*phi)
+    obsPoleSign = (
+        1.0 if phi > 0.0 else -1.0
+    )  # 1. if observatory is in the North pole, -1. if South
+    dang = (np.pi / 2.0 + (obsPoleSign * dec)) - (obsPoleSign * phi)
 
-    vx = np.sin(ha)*np.sin(dang*np.pi/180.)
-    vy = np.cos(dang*np.pi/180.)+np.zeros_like(ha)
-    vz = np.cos(ha)*np.sin(dang*np.pi/180.)-np.cos(dang*np.pi/180.)
+    vx = np.sin(ha) * np.sin(dang * np.pi / 180.0)
+    vy = np.cos(dang * np.pi / 180.0) + np.zeros_like(ha)
+    vz = np.cos(ha) * np.sin(dang * np.pi / 180.0) - np.cos(dang * np.pi / 180.0)
 
-    A = np.linspace(R/2.,R*2.,100)
-    res = (x+A*vx)**2.+(y+A*vy)**2.+(z+A*vz)**2. - R**2.
+    A = np.linspace(R / 2.0, R * 2.0, 100)
+    res = (x + A * vx) ** 2.0 + (y + A * vy) ** 2.0 + (z + A * vz) ** 2.0 - R**2.0
     Av = A[res.argmin()]
 
-    v = np.arccos((z+Av*vz)/R)
-    ux = np.arccos((x+Av*vx)/(R*np.sin(v)))
-    dy = y+Av*vy
+    v = np.arccos((z + Av * vz) / R)
+    ux = np.arccos((x + Av * vx) / (R * np.sin(v)))
+    dy = y + Av * vy
 
-    if dy < 0.:
-        ux = 2.*np.pi-ux
+    if dy < 0.0:
+        ux = 2.0 * np.pi - ux
 
     return ux
