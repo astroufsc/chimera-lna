@@ -3,17 +3,17 @@ import os
 import threading
 import time
 
+import serial
 from chimera.core import SYSTEM_CONFIG_DIRECTORY
 from chimera.core.exceptions import ChimeraException
 from chimera.core.lock import lock
+from chimera.instruments.dome import DomeBase
 from chimera.instruments.lamp import LampBase
 from chimera.interfaces.dome import DomeStatus, InvalidDomePositionException, Style
 from chimera.util.coord import Coord
 
 from chimera_lna.util.lookup_table import DomeLookupTable
-from chimera.instruments.dome import DomeBase
 
-import serial
 
 class DomeSlewTimeoutException(ChimeraException):
     """
@@ -78,13 +78,13 @@ class DomeLNA(DomeBase, LampBase):
             self["device"], baudrate=9600, timeout=self._serial_timeout
         )
         # On start, reset the dome.
-        self._resetDome(reset_tag=900)
+        self._reset_dome(reset_tag=900)
         # Get the dome azimuth just to move it to the init position if needed.
         self.get_az()
         # # Check if connection is okay.
-        self._checkIdle()
+        self._check_idle()
 
-    def _resetDome(self, reset_tag=None):
+    def _reset_dome(self, reset_tag=None):
         self._serial.flushInput()
         self._serial.flushOutput()
         ack = ""
@@ -102,14 +102,14 @@ class DomeLNA(DomeBase, LampBase):
 
         if reset_tag is not None:
             # When resetting the dome, move it to the reset_tag
-            ack = self._command("MEADE DOMO MOVER = %03d" % reset_tag)
+            ack = self._command(f"MEADE DOMO MOVER = {reset_tag:03d}")
             if not ack.startswith("ACK"):
-                ack = self._command("MEADE DOMO MOVER = %03d" % reset_tag)
+                ack = self._command(f"MEADE DOMO MOVER = {reset_tag:03d}")
                 time.sleep(2)
 
             # Try to move the dome again
             t0 = time.time()
-            while not self._checkIdle():
+            while not self._check_idle():
                 if time.time() - t0 > self["slew_timeout"]:
                     self.log.debug("Timeout moving the dome")
                     return
@@ -117,7 +117,7 @@ class DomeLNA(DomeBase, LampBase):
         else:
             return
 
-    def _checkIdle(self):
+    def _check_idle(self):
         ack = self._command("MEADE PROG STATUS")
         if ack.startswith("NAK"):
             self.log.debug("Got a NAK on status.")
@@ -234,7 +234,7 @@ class DomeLNA(DomeBase, LampBase):
     @lock
     def _init_dome(self):
         self._debug("Initializing dome...")
-        self._resetDome(reset_tag=900)
+        self._reset_dome(reset_tag=900)
 
     @lock
     def slew_to_az(self, az):
@@ -273,11 +273,11 @@ class DomeLNA(DomeBase, LampBase):
         # TODO: Abort point.
         # Run dome move command.
         # Works on the first try?
-        if "ACK" in self._command("MEADE DOMO MOVER = %03d" % dome_tag):
+        if "ACK" in self._command(f"MEADE DOMO MOVER = {dome_tag:03d}"):
             time.sleep(1)
         else:  # If not, reset the dome and try more few times...
             time.sleep(2)
-            ack = self._command("MEADE DOMO MOVER = %03d" % dome_tag)
+            ack = self._command(f"MEADE DOMO MOVER = {dome_tag:03d}")
             for i_retry in range(self._restart_tries):
                 if not ack.startswith("ACK"):
                     self.log.debug("No ACK from dome when trying to slew. Retrying...")
@@ -285,21 +285,21 @@ class DomeLNA(DomeBase, LampBase):
                     reset_tag = dome_tag - 100
                     if reset_tag < 801:
                         reset_tag = 982 - (801 - reset_tag)
-                    self._resetDome(reset_tag)
+                    self._reset_dome(reset_tag)
                     time.sleep(2)
-                    ack = self._command("MEADE DOMO MOVER = %03d" % dome_tag)
+                    ack = self._command(f"MEADE DOMO MOVER = {dome_tag:03d}")
                     time.sleep(1)
 
         self.slew_begin(az)
         t0 = time.time()
-        while not self._checkIdle():
+        while not self._check_idle():
             if time.time() - t0 > self["slew_timeout"]:
                 self.log.debug("Timeout moving the dome. Resetting...")
                 # Reset the dome.
                 reset_tag = dome_tag - 100
                 if reset_tag < 801:
                     reset_tag = 982 - (801 - reset_tag)
-                self._resetDome(reset_tag)
+                self._reset_dome(reset_tag)
                 break
             time.sleep(1)
 
@@ -317,24 +317,23 @@ class DomeLNA(DomeBase, LampBase):
             else:
 
                 self.log.debug(
-                    "Dome position error >= %i. Restart dome try %i."
-                    % (self._restart_precision, i_retry)
+                    f"Dome position error >= {self._restart_precision}. Restart dome try {i_retry}."
                 )
 
                 # Reset the dome.
                 reset_tag = dome_tag - 100
                 if reset_tag < 801:
                     reset_tag = 982 - (801 - reset_tag)
-                self._resetDome(reset_tag)
+                self._reset_dome(reset_tag)
 
                 ack = ""
                 for i in range(self._restart_tries):
                     if not ack.startswith("ACK"):
-                        ack = self._command("MEADE DOMO MOVER = %03d" % dome_tag)
+                        ack = self._command(f"MEADE DOMO MOVER = {dome_tag:03d}")
                         time.sleep(2)
 
                 # Try to move the dome again
-                while not self._checkIdle():
+                while not self._check_idle():
                     if time.time() - t0 > self["slew_timeout"]:
                         self.log.debug("Timeout moving the dome")
                     time.sleep(1)
@@ -348,7 +347,7 @@ class DomeLNA(DomeBase, LampBase):
         return NotImplementedError()
 
     def is_slewing(self):
-        return not self._checkIdle()
+        return not self._check_idle()
 
 
 def get_metadata(self, request):
