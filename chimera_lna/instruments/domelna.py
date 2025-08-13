@@ -350,21 +350,21 @@ class DomeLNA(DomeBase, LampBase):
         return not self._check_idle()
 
 
-def get_metadata(self, request):
-    # Check first if there is metadata from an metadata override method.
-    md = self.get_metadata_override(request)
-    if md is not None:
-        return md
-    # If not, just go on with the instrument's default metadata.
-    if self.is_slit_open():
-        slit = "Open"
-    else:
-        slit = "Closed"
+    def get_metadata(self, request):
+        # Check first if there is metadata from an metadata override method.
+        md = self.get_metadata_override(request)
+        if md is not None:
+            return md
+        # If not, just go on with the instrument's default metadata.
+        if self.is_slit_open():
+            slit = "Open"
+        else:
+            slit = "Closed"
 
-    return [
-        ("DOME_MDL", str(self["model"]), "Dome Model"),
-        ("DOME_TYP", str(self["style"]), "Dome Type"),
-        ("DOME_TRK", str(self["mode"]), "Dome Tracking/Standing"),
-        ("DOME_AZ", str(self.get_az()), "Dome Azimuth"),
-        ("DOME_SLT", str(slit), "Dome slit status"),
-    ]
+        return [
+            ("DOME_MDL", str(self["model"]), "Dome Model"),
+            ("DOME_TYP", str(self["style"]), "Dome Type"),
+            ("DOME_TRK", str(self["mode"]), "Dome Tracking/Standing"),
+            ("DOME_AZ", str(self.get_az()), "Dome Azimuth"),
+            ("DOME_SLT", str(slit), "Dome slit status"),
+        ]
