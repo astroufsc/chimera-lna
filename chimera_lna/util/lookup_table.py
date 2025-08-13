@@ -40,5 +40,5 @@ if __name__ == "__main__":
             "alt, az, (tag, distance): ",
             c[0],
             c[1],
-            dl.get_tag_altaz(Position.from_alt_az(c[0], c[1]), ret_distance=True),
+            dl.get_tag_altaz(c[0], c[1], ret_distance=True),
         )
