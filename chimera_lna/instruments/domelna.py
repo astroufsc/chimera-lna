@@ -83,7 +83,7 @@ class DomeLNA(DomeBase, LampBase):
         # On start, reset the dome.
         self._resetDome(reset_tag=900)
         # Get the dome azimuth just to move it to the init position if needed.
-        self.getAz()
+        self.get_az()
         # # Check if connection is okay.
         self._checkIdle()
 
@@ -155,11 +155,11 @@ class DomeLNA(DomeBase, LampBase):
         self._serial.flushOutput()
         self._serial.flushInput()
         self._debug(f"[write] '{cmd}'")
-        self._serial.write(f"{cmd}\r")
+        self._serial.write(f"{cmd}\r".encode())
         t0 = time.time()
         ack = ""
         while "\r" not in ack:
-            ack += self._serial.read()
+            ack += self._serial.read().decode()
             time.sleep(0.1)
             if (time.time() - t0) > self._serial_timeout:
                 self.log.debug("Error reading serial... Trying to flush it.")
@@ -171,28 +171,28 @@ class DomeLNA(DomeBase, LampBase):
         return ack.replace("\r", "")
 
     @lock
-    def switchOn(self):
+    def switch_on(self):
         ret = "ACK" in self._command("MEADE FLAT_WEAK LIGAR")
         if ret:
             self._light_on = True
         return ret
 
     @lock
-    def switchOff(self):
+    def switch_off(self):
         ret = "ACK" in self._command("MEADE FLAT_WEAK DESLIGAR")
         if ret:
             self._light_on = False
         return ret
 
-    def isSwitchedOn(self):
+    def is_switched_on(self):
         return self._light_on
 
-    def isSlitOpen(self):
+    def is_slit_open(self):
         # FIXME: bool(self._command("MEADE PROG STATUS")[19])
         return self._slitOpen
 
     @lock
-    def openSlit(self):
+    def open_slit(self):
         self.log.debug("Opening dome slit.")
         ack = "ACK" in self._command("MEADE TRAPEIRA ABRIR")
         if ack:
@@ -200,7 +200,7 @@ class DomeLNA(DomeBase, LampBase):
         return ack
 
     @lock
-    def closeSlit(self):
+    def close_slit(self):
         self.log.debug("Closing dome slit.")
         ack = "ACK" in self._command("MEADE TRAPEIRA FECHAR")
         if ack:
@@ -220,7 +220,7 @@ class DomeLNA(DomeBase, LampBase):
         return ack
 
     @lock
-    def getAz(self, tag=None):
+    def get_az(self, tag=None):
 
         if tag is not None:
             ack = tag
@@ -240,7 +240,7 @@ class DomeLNA(DomeBase, LampBase):
         self._resetDome(reset_tag=900)
 
     @lock
-    def slewToAz(self, az):
+    def slew_to_az(self, az):
         # Dome is formed of tags with numbers from 801 to 982 (0 to 360 degress) where 801 is placed in the degree 270.
         if az > 360:
             raise InvalidDomePositionException(
@@ -252,9 +252,9 @@ class DomeLNA(DomeBase, LampBase):
         # time.sleep(.5)
 
         # Calculate the dome azimuth offset.
-        tel = self.getTelescope()
-        if not tel or not tel.isTracking():
-            if not tel.isTracking():
+        tel = self.get_telescope()
+        if not tel or not tel.is_tracking():
+            if not tel.is_tracking():
                 self.log.debug(
                     "Telescope is not Tracking. Ignoring the dome lookup table."
                 )
@@ -267,7 +267,7 @@ class DomeLNA(DomeBase, LampBase):
             else:
                 dome_tag = int(math.ceil(az / 2.0 + 846))
         else:
-            dome_tag = self._lookup.get_tag_altaz(tel.getPositionAltAz())
+            dome_tag = self._lookup.get_tag_altaz(tel.get_position_alt_az())
             # Don't move if we are on the right position.
             if abs(dome_tag - self._getTag()) <= self._dome_precision:
                 return True
@@ -292,7 +292,7 @@ class DomeLNA(DomeBase, LampBase):
                     ack = self._command("MEADE DOMO MOVER = %03d" % dome_tag)
                     time.sleep(1)
 
-        self.slewBegin(az)
+        self.slew_begin(az)
         t0 = time.time()
         while not self._checkIdle():
             if time.time() - t0 > self["slew_timeout"]:
@@ -313,7 +313,7 @@ class DomeLNA(DomeBase, LampBase):
             tag_now = self._getTag()
             if abs(tag_now - dome_tag) < self._restart_precision:
                 # If position is wrong for less than restart_precision, just confirm.
-                self.slewComplete(self.getAz(tag_now), DomeStatus.OK)
+                self.slew_complete(self.get_az(tag_now), DomeStatus.OK)
                 return True
 
             else:
@@ -346,20 +346,20 @@ class DomeLNA(DomeBase, LampBase):
         self.log.debug("Sleeping 15s after tracking enabled...")
         time.sleep(15)
 
-    def abortSlew(self):
+    def abort_slew(self):
         return NotImplementedError()
 
-    def isSlewing(self):
+    def is_slewing(self):
         return not self._checkIdle()
 
 
-def getMetadata(self, request):
+def get_metadata(self, request):
     # Check first if there is metadata from an metadata override method.
-    md = self.getMetadataOverride(request)
+    md = self.get_metadata_override(request)
     if md is not None:
         return md
     # If not, just go on with the instrument's default metadata.
-    if self.isSlitOpen():
+    if self.is_slit_open():
         slit = "Open"
     else:
         slit = "Closed"
@@ -368,6 +368,6 @@ def getMetadata(self, request):
         ("DOME_MDL", str(self["model"]), "Dome Model"),
         ("DOME_TYP", str(self["style"]), "Dome Type"),
         ("DOME_TRK", str(self["mode"]), "Dome Tracking/Standing"),
-        ("DOME_AZ", str(self.getAz()), "Dome Azimuth"),
+        ("DOME_AZ", str(self.get_az()), "Dome Azimuth"),
         ("DOME_SLT", str(slit), "Dome slit status"),
     ]
