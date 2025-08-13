@@ -11,12 +11,9 @@ from chimera.interfaces.dome import DomeStatus, InvalidDomePositionException, St
 from chimera.util.coord import Coord
 
 from chimera_lna.util.lookup_table import DomeLookupTable
-
-__author__ = "william"
-
-import serial
 from chimera.instruments.dome import DomeBase
 
+import serial
 
 class DomeSlewTimeoutException(ChimeraException):
     """
@@ -207,7 +204,7 @@ class DomeLNA(DomeBase, LampBase):
             self._slitOpen = False
         return ack
 
-    def _getTag(self):
+    def _get_tag(self):
         ack = self._command("MEADE PROG STATUS")[8:11]
         if ack == "   ":
             self.log.info("Initializing dome...")
@@ -225,7 +222,7 @@ class DomeLNA(DomeBase, LampBase):
         if tag is not None:
             ack = tag
         else:
-            ack = self._getTag()
+            ack = self._get_tag()
 
         if ack < 846:  # 270 to 360 deg
             az = 270 + (ack - 801) * 2
@@ -267,9 +264,10 @@ class DomeLNA(DomeBase, LampBase):
             else:
                 dome_tag = int(math.ceil(az / 2.0 + 846))
         else:
-            dome_tag = self._lookup.get_tag_altaz(tel.get_position_alt_az())
+            alt, az = tel.get_position_alt_az()
+            dome_tag = self._lookup.get_tag_altaz(alt, az)
             # Don't move if we are on the right position.
-            if abs(dome_tag - self._getTag()) <= self._dome_precision:
+            if abs(dome_tag - self._get_tag()) <= self._dome_precision:
                 return True
 
         # TODO: Abort point.
@@ -310,7 +308,7 @@ class DomeLNA(DomeBase, LampBase):
         # try to restart the dome and put it on the correct position.
         for i_retry in range(self._restart_tries):
             t0 = time.time()
-            tag_now = self._getTag()
+            tag_now = self._get_tag()
             if abs(tag_now - dome_tag) < self._restart_precision:
                 # If position is wrong for less than restart_precision, just confirm.
                 self.slew_complete(self.get_az(tag_now), DomeStatus.OK)

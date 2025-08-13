@@ -18,11 +18,12 @@ class DomeLookupTable:
             for v in self._table
         ]
 
-    def get_tag_altaz(self, position, ret_distance=False):
+    def get_tag_altaz(self, alt: float, az: float, ret_distance=False):
         """
-        Returns the nearest tag for a given position (AltAz).
+        Returns the nearest tag for a given position: alt, az in degrees.
         If ret_distance is `True`, returns distance from lookuptable value to the point.
         """
+        position = Position.from_alt_az(Coord.from_r(alt), Coord.from_r(az))
         argmin = np.argmin([v[0].angsep(position) for v in self._coordinates])
         if ret_distance:
             return int(self._coordinates[argmin][1]), self._coordinates[argmin][
