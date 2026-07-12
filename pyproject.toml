@@ -1,40 +1,31 @@
 [project]
-name = "chimera-lna"
-version = "0.2"
-description = "Chimera plugin for LNA domes"
-readme = "README.rst"
+name = "chimera_lna"
+version = "0.2.0"
+description = "Chimera plugin for the LNA observatory dome and weather station"
 license = "GPL-2.0-or-later"
 authors = [
     { name = "Paulo Henrique Silva", email = "ph.silva@gmail.com" },
     { name = "William Schoenell", email = "wschoenell@gmail.com" },
 ]
-urls = { "homepage" = "https://chimera.readthedocs.org", "source" = "https://github.com/astroufsc/chimera" }
-
+readme = "README.md"
 requires-python = ">=3.13"
-dependencies = ["chimera", "pyserial>=3.5"]
+dependencies = [
+    "chimera",
+    "numpy>=2.1.1",
+    "pyserial>=3.5",
+    "requests>=2.32",
+]
 
-[tool.uv.sources]
-chimera = { path = "../chimera" }
+[project.urls]
+homepage = "https://chimera.readthedocs.org"
+source = "https://github.com/astroufsc/chimera-lna"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
-[tool.uv]
-dev-dependencies = [
-    "black>=25.1.0",
-    "pre-commit>=4.1.0",
-    "pytest>=8.3.3",
-    "pytest-cov>=6.0.0",
-    "ruff>=0.9.4",
-]
-
-[dependency-groups]
-docs = ["furo>=2024.8.6", "sphinx>=8.1.3"]
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-addopts = "--import-mode=importlib"
+[tool.hatch.build.targets.wheel]
+packages = ["src/chimera_lna"]
 
 [tool.ruff]
 line-length = 88
@@ -45,3 +36,18 @@ select = ["N", "I", "UP", "F"]
 
 [tool.ruff.lint.flake8-copyright]
 notice-rgx = "(?i)# SPDX-FileCopyrightText:\\s\\d{4}(-(\\d{4}|present))*"
+
+[tool.uv.sources]
+chimera = { git = "https://github.com/astroufsc/chimera.git" }
+
+[tool.uv]
+dev-dependencies = [
+    "pre-commit>=4.1.0",
+    "pytest>=8.3.3",
+    "pytest-cov>=6.0.0",
+    "ruff>=0.9.4",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--import-mode=importlib"

@@ -1,0 +1,37 @@
+name: chimera-lna
+on:
+  push:
+    branches:
+      - master
+      - py3
+  pull_request:
+    branches:
+      - master
+      - py3
+
+env:
+  RUFF_OUTPUT_FORMAT: github
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: setup uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: install
+        run: uv sync --all-extras --dev
+
+      - name: lint
+        run: uv run pre-commit run --all-files
+
+      - name: test
+        run: uv run pytest
+
+      - name: build
+        run: uv build
