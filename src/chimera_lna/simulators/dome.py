@@ -20,6 +20,7 @@ Run it standalone with:
 
 import argparse
 import math
+import socket
 import socketserver
 import threading
 import time
@@ -31,19 +32,23 @@ MAX_TAG = 982
 class _DomeRequestHandler(socketserver.BaseRequestHandler):
     def handle(self):
         simulator = self.server.simulator
+        simulator._connections.add(self.request)
         buffer = b""
-        while True:
-            try:
-                data = self.request.recv(1024)
-            except ConnectionError:
-                break
-            if not data:
-                break
-            buffer += data
-            while b"\r" in buffer:
-                line, _, buffer = buffer.partition(b"\r")
-                response = simulator.process_command(line.decode().strip())
-                self.request.sendall(f"{response}\r".encode())
+        try:
+            while True:
+                try:
+                    data = self.request.recv(1024)
+                except (ConnectionError, OSError):
+                    break
+                if not data:
+                    break
+                buffer += data
+                while b"\r" in buffer:
+                    line, _, buffer = buffer.partition(b"\r")
+                    response = simulator.process_command(line.decode().strip())
+                    self.request.sendall(f"{response}\r".encode())
+        finally:
+            simulator._connections.discard(self.request)
 
 
 class _DomeServer(socketserver.ThreadingTCPServer):
@@ -87,6 +92,7 @@ class DomeSimulator:
 
         self._server = None
         self._thread = None
+        self._connections = set()
 
     # lifecycle
 
@@ -106,6 +112,15 @@ class DomeSimulator:
             self._thread.join()
             self._server = None
             self._thread = None
+
+    def drop_connections(self):
+        """Sever every live client connection (simulates a serial/USB drop);
+        the server keeps listening, so clients can reconnect."""
+        for conn in list(self._connections):
+            try:
+                conn.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
 
     def __enter__(self):
         return self.start()
