@@ -1,3 +1,8 @@
+# NOTE: legacy dome-model calibration helper (records dome tag vs. telescope
+# position into a Google spreadsheet). It still uses the old chimera API and
+# extra dependencies (gspread, oauth2client) and has NOT been ported to the
+# current chimera version.
+
 import datetime
 import sys
 

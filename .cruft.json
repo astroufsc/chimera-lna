@@ -1,0 +1,29 @@
+{
+  "template": "https://github.com/astroufsc/chimera-template",
+  "commit": "0177dff80a2c4e7fcdb67a2f775a1379ba62fb81",
+  "checkout": null,
+  "context": {
+    "cookiecutter": {
+      "project_name": "LNA",
+      "project_slug": "chimera-lna",
+      "package_name": "chimera_lna",
+      "__module_name": "lna",
+      "project_short_description": "Chimera plugin for the LNA observatory dome and weather station",
+      "author_name": "William Schoenell",
+      "author_email": "wschoenell@gmail.com",
+      "github_username": "astroufsc",
+      "version": "0.2.0",
+      "license": "GPL-2.0-or-later",
+      "python_version": "3.13",
+      "include_instrument": "yes",
+      "include_controller": "no",
+      "__instrument_class_name": "LnaInstrument",
+      "__controller_class_name": "LnaController",
+      "__instrument_module_name": "lnainstrument",
+      "__controller_module_name": "lnacontroller",
+      "year": "2014",
+      "_template": "https://github.com/astroufsc/chimera-template"
+    }
+  },
+  "directory": null
+}
