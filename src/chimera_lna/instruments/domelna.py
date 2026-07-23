@@ -4,6 +4,7 @@
 
 import math
 import os
+import re
 import threading
 import time
 
@@ -69,6 +70,16 @@ class DomeLNA(DomeBase, LampBase):
         self._dome_precision = 2  # Number of tags = +/- 4 degrees
         self._restart_precision = 4  # Number of tags = +/- 8 degrees.
         self._restart_tries = 3
+        self._status_tries = 5  # STATUS polls before giving up on a valid frame
+
+        # Last valid STATUS frame: (tag, busy, monotonic timestamp).
+        # get_az()/is_slewing() answer from this instead of competing for
+        # the serial port: a slew in progress polls STATUS every
+        # poll_interval while holding the monitor, so during motion the
+        # cache is always fresher than the TTL and callers get an instant
+        # answer instead of blocking for the whole slew.
+        self._status_cache = None
+        self._status_cache_ttl = 2.0  # seconds; > poll_interval
 
         # Load LookUp table
         self._lookup = DomeLookupTable()
@@ -142,14 +153,37 @@ class DomeLNA(DomeBase, LampBase):
                 return
             time.sleep(self["poll_interval"])
 
-    def _check_idle(self):
+    # A well-formed STATUS frame: 8 spaces, 3-digit tag, space, '*' and 16
+    # status bits. Motor EMI corrupts single bytes while the dome moves, so
+    # any frame that does not match exactly is discarded instead of trusted.
+    _status_re = re.compile(r"^ {8}(\d{3}) \*([01]{16})$")
+    _status_blank_re = re.compile(r"^ {11} \*[01]{16}$")
+
+    def _get_status(self):
+        """
+        Send MEADE PROG STATUS and parse the reply.
+
+        Returns (tag, busy) for a well-formed frame, "blank" for a valid
+        frame with an empty tag field (dome not initialized), or None for a
+        corrupted/unparseable reply.
+        """
         ack = self._command("MEADE PROG STATUS")
-        if ack.startswith("NAK"):
-            self.log.debug("Got a NAK on status.")
+        m = self._status_re.match(ack)
+        if m and 801 <= int(m.group(1)) <= 982:
+            tag, busy = int(m.group(1)), m.group(2)[3] == "1"
+            self._status_cache = (tag, busy, time.monotonic())
+            return tag, busy
+        if self._status_blank_re.match(ack):
+            return "blank"
+        self.log.debug(f"Discarding invalid dome status frame ({ack!r}).")
+        return None
+
+    def _check_idle(self):
+        status = self._get_status()
+        if not isinstance(status, tuple):
+            # NAK, blank or corrupted frame: report busy, callers keep polling
             return False
-        if len(ack) < 17:  # Sometimes ack is garbage. So, return that dome is busy.
-            return False
-        return ack[16] != "1"  # if '1', system busy
+        return not status[1]
 
     def _debug(self, msg):
         if self._debug_log:
@@ -161,7 +195,33 @@ class DomeLNA(DomeBase, LampBase):
             )
             self._debug_log.flush()
 
+    def _reconnect(self):
+        """
+        Reopen the serial port after a fatal serial error (e.g. a USB
+        re-enumeration makes reads return EOF and pyserial raise
+        SerialException). Does not reset/move the dome, only the port.
+        """
+        self._close()
+        for delay in (1, 5, 10):
+            try:
+                self._serial = self._create_serial()
+                self.log.info("Reconnected to the dome serial port.")
+                return
+            except serial.SerialException as e:
+                self.log.warning(f"Dome reconnect failed ({e}). Retrying in {delay}s.")
+                time.sleep(delay)
+        self._serial = self._create_serial()
+
     def _command(self, cmd):
+        try:
+            return self._command_once(cmd)
+        except serial.SerialException as e:
+            self.log.warning(f"Serial error sending '{cmd}' ({e}). Reconnecting...")
+            self._debug(f"[error] '{cmd}' - {e}")
+            self._reconnect()
+            return self._command_once(cmd)
+
+    def _command_once(self, cmd):
         self._serial.reset_output_buffer()
         self._serial.reset_input_buffer()
         self._debug(f"[write] '{cmd}'")
@@ -221,16 +281,20 @@ class DomeLNA(DomeBase, LampBase):
         return ack
 
     def _get_tag(self):
-        ack = self._command("MEADE PROG STATUS")[8:11]
-        if ack == "   ":
-            self.log.info("Initializing dome...")
-            self._init_dome()
-            time.sleep(self["poll_interval"])
-            self.log.info("Dome initialized.")
-            ack = float(self._command("MEADE PROG STATUS")[8:11])
-        else:
-            ack = float(ack)
-        return ack
+        for _ in range(self._status_tries):
+            status = self._get_status()
+            if isinstance(status, tuple):
+                return float(status[0])
+            if status == "blank":
+                self.log.info("Initializing dome...")
+                self._init_dome()
+                time.sleep(self["poll_interval"])
+                self.log.info("Dome initialized.")
+                continue
+            time.sleep(self["retry_delay"])
+        raise ChimeraException(
+            f"Could not read a valid dome position after {self._status_tries} tries"
+        )
 
     @staticmethod
     def _tag_to_az(tag):
@@ -246,10 +310,26 @@ class DomeLNA(DomeBase, LampBase):
         else:
             return int(math.ceil(az / 2.0 + 846))
 
+    def _cached_status(self):
+        """Return the last (tag, busy) if fresher than the TTL, else None."""
+        cached = self._status_cache
+        if cached and (time.monotonic() - cached[2]) <= self._status_cache_ttl:
+            return cached[0], cached[1]
+        return None
+
     @lock
+    def _read_status(self):
+        """Serial STATUS read behind the monitor. Single transaction:
+        _get_tag() refreshes the cache with the busy bit of the same frame."""
+        tag = self._get_tag()
+        return tag, self._status_cache[1]
+
     def get_az(self, tag=None):
+        # cache first: a locked read would block behind a slew in progress
+        # even though the slew itself refreshes the cache every second
         if tag is None:
-            tag = self._get_tag()
+            cached = self._cached_status()
+            tag = cached[0] if cached else self._read_status()[0]
         return float(self._tag_to_az(tag))
 
     @lock
@@ -292,11 +372,22 @@ class DomeLNA(DomeBase, LampBase):
         if telescope is not None:
             alt, telescope_az = telescope.get_position_alt_az()
             dome_tag = self._lookup.get_tag_altaz(alt, telescope_az)
-            # Don't move if we are on the right position.
-            if abs(dome_tag - self._get_tag()) <= self._dome_precision:
-                return True
         else:
             dome_tag = self._az_to_tag(az)
+
+        # Don't move (nor disturb the controller) if already on position.
+        if self._tag_distance(dome_tag, self._get_tag()) <= self._dome_precision:
+            return True
+
+        # MOVER is NAKed while the controller is busy: if a previous command
+        # left the dome moving, wait for it instead of triggering a reset.
+        t0 = time.time()
+        while not self._check_idle():
+            if time.time() - t0 > self["slew_timeout"]:
+                self.log.warning("Dome busy for too long before slew. Resetting...")
+                self._reset_dome()
+                break
+            time.sleep(self["poll_interval"])
 
         # Run dome move command.
         # Works on the first try?
@@ -328,7 +419,7 @@ class DomeLNA(DomeBase, LampBase):
         for i_retry in range(self._restart_tries):
             t0 = time.time()
             tag_now = self._get_tag()
-            if abs(tag_now - dome_tag) < self._restart_precision:
+            if self._tag_distance(tag_now, dome_tag) < self._restart_precision:
                 # If position is wrong for less than restart_precision, just confirm.
                 self.slew_complete(self.get_az(tag_now), DomeStatus.OK)
                 return True
@@ -353,6 +444,22 @@ class DomeLNA(DomeBase, LampBase):
                     break
                 time.sleep(self["poll_interval"])
 
+        self.slew_complete(self.get_az(), DomeStatus.ABORTED)
+        raise DomeSlewTimeoutException(
+            f"Dome did not reach tag {dome_tag} after "
+            f"{self._restart_tries} restarts (currently at {self._get_tag():.0f})"
+        )
+
+    @staticmethod
+    def _tag_distance(tag_a, tag_b):
+        """
+        Distance between two tags in tags, accounting for the wrap-around
+        (the 182-tag range 801-982 covers a full turn: 981/982 overlap
+        801/802, so one revolution is 180 tags).
+        """
+        distance = abs(tag_a - tag_b) % 180
+        return min(distance, 180 - distance)
+
     @staticmethod
     def _recovery_tag(dome_tag):
         """
@@ -372,7 +479,14 @@ class DomeLNA(DomeBase, LampBase):
         raise NotImplementedError()
 
     def is_slewing(self):
-        return not self._check_idle()
+        # cache first, for the same reason as get_az() — and the locked
+        # fallback also stops this from hitting the serial port while the
+        # slew polling loop is mid-read (unlocked, that corrupts both frames
+        # and costs a serial_timeout each)
+        cached = self._cached_status()
+        if cached is not None:
+            return cached[1]
+        return self._read_status()[1]
 
     def get_metadata(self, request):
         # Check first if there is metadata from an metadata override method.

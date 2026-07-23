@@ -6,6 +6,7 @@ Manager lifecycle, talking over a TCP socket to the dome controller simulator
 as if it were the real hardware.
 """
 
+import re
 import socket
 import time
 
@@ -48,10 +49,9 @@ class TestDomeSimulatorProtocol:
     def test_status_layout(self):
         with DomeSimulator(initial_tag=900) as simulator:
             response = raw_command(simulator, "MEADE PROG STATUS")
-            assert response.startswith("ACK")
+            assert re.fullmatch(r" {8}\d{3} \*[01]{16}", response)
             assert response[8:11] == "900"
             assert response[16] == "0"  # idle
-            assert len(response) >= 17
 
     def test_move_reports_busy_then_arrives(self):
         with DomeSimulator(initial_tag=900, tags_per_second=20) as simulator:
@@ -92,6 +92,38 @@ class TestDomeLNAUnits:
         # same as 801; 982 -> az 272, same as 802), so stop at 980
         for tag in (801, 820, 846, 900, 950, 980):
             assert DomeLNA._az_to_tag(DomeLNA._tag_to_az(tag)) == tag
+
+    def test_tag_distance_wraps(self):
+        assert DomeLNA._tag_distance(905, 905) == 0
+        assert DomeLNA._tag_distance(905, 907) == 2
+        # 981 overlaps 801: physically adjacent across the wrap
+        assert DomeLNA._tag_distance(802, 981) == 1
+        assert DomeLNA._tag_distance(801, 980) == 1
+        assert DomeLNA._tag_distance(805, 895) == 90
+
+    def test_status_frame_validation(self):
+        # clean frames, as captured from the real controller
+        m = DomeLNA._status_re.match("        900 *0010000000000000")
+        assert m and m.group(1) == "900" and m.group(2)[3] == "0"  # idle
+        m = DomeLNA._status_re.match("        805 *0001010000101000")
+        assert m and m.group(2)[3] == "1"  # busy
+        # EMI-corrupted frames captured on the wire must all be rejected
+        for frame in (
+            "    �   805 *0011010000101000",
+            "        979 *0015010010001000",
+            "        979 *0p11010010001000",
+            '    "   979 *0011010010001000',
+            "       $885 j0001010000101000",
+            "          0 *0001010000101000",
+            "        960 +0001010000101000",
+            "        960 ������j�",
+            "NAK",
+            "",
+        ):
+            assert DomeLNA._status_re.match(frame) is None, frame
+            assert DomeLNA._status_blank_re.match(frame) is None, frame
+        # blank tag (dome not initialized) is a distinct, valid case
+        assert DomeLNA._status_blank_re.match("            *0001010000101000")
 
 
 class TestDomeLNALifecycle:
@@ -161,4 +193,4 @@ class TestDomeLNALifecycle:
         manager.remove("/DomeLNA/stop")
         # after __stop__ the driver must have disconnected: the simulator
         # still answers new connections
-        assert raw_command(simulator, "MEADE PROG STATUS").startswith("ACK")
+        assert raw_command(simulator, "MEADE PROG STATUS")[8:11].isdigit()
