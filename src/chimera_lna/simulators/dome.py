@@ -20,6 +20,7 @@ Run it standalone with:
 
 import argparse
 import math
+import socket
 import socketserver
 import threading
 import time
@@ -31,19 +32,23 @@ MAX_TAG = 982
 class _DomeRequestHandler(socketserver.BaseRequestHandler):
     def handle(self):
         simulator = self.server.simulator
+        simulator._connections.add(self.request)
         buffer = b""
-        while True:
-            try:
-                data = self.request.recv(1024)
-            except ConnectionError:
-                break
-            if not data:
-                break
-            buffer += data
-            while b"\r" in buffer:
-                line, _, buffer = buffer.partition(b"\r")
-                response = simulator.process_command(line.decode().strip())
-                self.request.sendall(f"{response}\r".encode())
+        try:
+            while True:
+                try:
+                    data = self.request.recv(1024)
+                except (ConnectionError, OSError):
+                    break
+                if not data:
+                    break
+                buffer += data
+                while b"\r" in buffer:
+                    line, _, buffer = buffer.partition(b"\r")
+                    response = simulator.process_command(line.decode().strip())
+                    self.request.sendall(f"{response}\r".encode())
+        finally:
+            simulator._connections.discard(self.request)
 
 
 class _DomeServer(socketserver.ThreadingTCPServer):
@@ -60,8 +65,8 @@ class DomeSimulator:
     move command followed by busy status polls until the position is reached.
 
     Supported commands:
-        MEADE PROG STATUS         -> "ACK STATnnn bsy=b00" (tag at [8:11],
-                                     busy flag at [16])
+        MEADE PROG STATUS         -> "        nnn *bbbbbbbbbbbbbbbb" (tag at
+                                     [8:11], 16 status bits, busy at [16])
         MEADE PROG PARAR          -> stop movement
         MEADE PROG RESET          -> restart controller
         MEADE DOMO MOVER = NNN    -> move to tag NNN (801..982)
@@ -87,6 +92,7 @@ class DomeSimulator:
 
         self._server = None
         self._thread = None
+        self._connections = set()
 
     # lifecycle
 
@@ -106,6 +112,15 @@ class DomeSimulator:
             self._thread.join()
             self._server = None
             self._thread = None
+
+    def drop_connections(self):
+        """Sever every live client connection (simulates a serial/USB drop);
+        the server keeps listening, so clients can reconnect."""
+        for conn in list(self._connections):
+            try:
+                conn.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
 
     def __enter__(self):
         return self.start()
@@ -155,10 +170,12 @@ class DomeSimulator:
         if command == "MEADE PROG STATUS":
             with self._lock:
                 self._update_position()
-                busy = "1" if self._move_started is not None else "0"
+                busy = self._move_started is not None
                 tag = int(round(self._position))
-            # DomeLNA expects the tag at chars [8:11] and the busy flag at [16]
-            return f"ACK STAT{tag:03d} bsy={busy}00"
+            # Real controller frame: 8 spaces, 3-digit tag, ' *' and 16 status
+            # bits. DomeLNA validates this layout strictly (busy bit at [16]).
+            bits = f"00{int(not busy)}{int(busy)}" + "0" * 12
+            return f"        {tag:03d} *{bits}"
 
         elif command == "MEADE PROG PARAR":
             with self._lock:
