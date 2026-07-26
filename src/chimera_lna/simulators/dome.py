@@ -46,6 +46,10 @@ class _DomeRequestHandler(socketserver.BaseRequestHandler):
                 while b"\r" in buffer:
                     line, _, buffer = buffer.partition(b"\r")
                     response = simulator.process_command(line.decode().strip())
+                    if simulator.muted:
+                        # a hung/powered-off controller: the link is up and
+                        # writes succeed, nothing ever comes back
+                        continue
                     self.request.sendall(f"{response}\r".encode())
         finally:
             simulator._connections.discard(self.request)
@@ -89,6 +93,9 @@ class DomeSimulator:
 
         self.slit_open = False
         self.lamp_on = False
+        # when True the controller accepts commands and answers nothing
+        # (powered-off / hung controller behind a healthy serial link)
+        self.muted = False
 
         self._server = None
         self._thread = None

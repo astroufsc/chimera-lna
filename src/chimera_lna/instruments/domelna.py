@@ -9,7 +9,6 @@ import re
 import threading
 import time
 from concurrent.futures import Future
-from contextlib import contextmanager
 
 import serial
 from chimera.core import SYSTEM_CONFIG_DIRECTORY
@@ -31,6 +30,14 @@ class DomeSlewTimeoutException(ChimeraException):
     """
 
 
+class DomeCloseFailedException(ChimeraException):
+    """
+    Raised when the slit could not be closed. This is the one dome failure
+    that must never be silent: an open slit in the rain damages the
+    telescope, so the operator has to hear about it.
+    """
+
+
 class DomeLNA(DomeBase, LampBase):
     """
     COTE/LNA custom dome.
@@ -41,6 +48,16 @@ class DomeLNA(DomeBase, LampBase):
     `device` accepts anything supported by pyserial's serial_for_url: a real
     serial port ("/dev/ttyS0") or a socket bridge ("socket://host:port"),
     which is how the chimera_lna.simulators.dome simulator is reached.
+
+    Failure policy: the dome is a noisy, EMI-prone serial device that goes
+    away (controller reset, USB re-enumeration, cable) and comes back on its
+    own. Almost nothing here raises. A dedicated I/O thread owns the port and
+    keeps trying to reconnect forever; status queries answer from the last
+    known frame while the link is down, and motion commands retry and then
+    defer to the control loop, which re-queues the move on the next cycle.
+    An exception escaping the driver would abort whatever asked (an exposure
+    gathering FITS headers, a whole scheduled program) for a fault that
+    usually heals itself in seconds.
     """
 
     __config__ = {
@@ -51,6 +68,8 @@ class DomeLNA(DomeBase, LampBase):
         "retry_delay": 2.0,  # seconds between command retries
         "poll_interval": 1.0,  # seconds between dome status polls
         "motion_wait": 20.0,  # seconds to wait for a running motion command
+        "io_deadline": 30.0,  # seconds a command may spend retrying the port
+        "heal_interval": 5.0,  # seconds between reconnect probes while down
     }
 
     def __init__(self):
@@ -68,11 +87,17 @@ class DomeLNA(DomeBase, LampBase):
         self._serial = None
         self._io_queue = queue.Queue()
         self._io_thread = None
-        self._reconnect_delays = (1, 5, 10)
+        self._reconnect_delays = (0.5, 2.0, 5.0)
+
+        # Link health. While the dome is not answering, status queries skip
+        # the port entirely (they answer from the cache) and the worker
+        # probes for recovery every heal_interval, forever.
+        self._io_healthy = True
+        self._next_heal = 0.0
 
         # Motion commands exclude each other with a bounded wait: a caller
-        # that cannot start within motion_wait gets "Dome busy" instead of
-        # parking a bus worker for a whole slew. RLock: slew_to_az can reach
+        # that cannot start within motion_wait gives up instead of parking a
+        # bus worker for a whole slew. RLock: slew_to_az can reach
         # _init_dome on the same thread through _get_tag.
         self._motion_lock = threading.RLock()
 
@@ -112,10 +137,15 @@ class DomeLNA(DomeBase, LampBase):
         )
         self._io_thread.start()
         # On start, reset the dome to the park tag, read the position back
-        # and check the controller answers idle.
-        self._reset_dome(reset_tag=self._park_tag)
-        self.get_az()
-        self._check_idle()
+        # and check the controller answers idle. A dome that is off or
+        # unplugged must not stop the instrument from starting: the worker
+        # keeps probing and the dome joins in when it answers.
+        try:
+            self._reset_dome(reset_tag=self._park_tag)
+            self.get_az()
+            self._check_idle()
+        except Exception as e:
+            self.log.warning(f"Dome did not answer during startup ({e}).")
         return super().__start__()
 
     def __stop__(self):
@@ -124,6 +154,10 @@ class DomeLNA(DomeBase, LampBase):
         if self._io_thread is not None:
             self._io_thread.join(timeout=self["serial_timeout"] + 5)
 
+    # ------------------------------------------------------------------
+    # serial I/O: everything below _io_loop runs on the worker thread only
+    # ------------------------------------------------------------------
+
     def _create_serial(self):
         return serial.serial_for_url(
             self["device"], baudrate=9600, timeout=self["serial_timeout"]
@@ -131,161 +165,145 @@ class DomeLNA(DomeBase, LampBase):
 
     def _close(self):
         if self._serial is not None and self._serial.is_open:
-            self._serial.close()
+            try:
+                self._serial.close()
+            except Exception:
+                pass
 
     def _io_loop(self):
         """
         Sole owner of the serial port: opens it, runs every command
-        transaction and reconnects on failure. Exits on the None sentinel,
-        closing the port and failing whatever raced in after it.
+        transaction, and probes for recovery while the dome is down. Exits
+        only on the None sentinel.
         """
-        try:
-            self._serial = self._create_serial()
-        except Exception as e:
-            # keep serving: the first command will go through _reconnect()
-            self.log.warning(f"Could not open dome serial port ({e}).")
+        self._open_port()
         while True:
-            item = self._io_queue.get()
+            try:
+                item = self._io_queue.get(timeout=self["heal_interval"])
+            except queue.Empty:
+                self._heal()
+                continue
             if item is None:
                 break
-            cmd, future = item
+            cmd, future, deadline = item
             try:
-                future.set_result(self._transact(cmd))
+                if not self._io_healthy and time.monotonic() < self._next_heal:
+                    # link known bad with a probe already scheduled: answer
+                    # immediately so callers fall back to the cache instead
+                    # of waiting out a serial timeout they cannot win
+                    future.set_result("")
+                else:
+                    future.set_result(self._attempt(cmd, deadline))
             except Exception as e:
-                future.set_exception(e)
+                # the worker must outlive any single command
+                self.log.exception(f"Dome I/O worker error on '{cmd}' ({e}).")
+                if not future.done():
+                    future.set_result("")
         self._close()
-        self._fail_pending(ChimeraException("Dome I/O worker stopped."))
+        self._fail_pending()
 
-    def _fail_pending(self, error):
+    def _open_port(self):
+        try:
+            self._serial = self._create_serial()
+            return True
+        except Exception as e:
+            self.log.warning(f"Could not open dome serial port ({e}).")
+            self._serial = None
+            self._mark_unhealthy()
+            return False
+
+    def _attempt(self, cmd, deadline):
+        """
+        Run cmd, reconnecting and retrying until the dome answers or the
+        caller's deadline passes. Returns the reply, or "" when the dome
+        never answered — callers read that as a missing ACK and retry.
+        """
+        while True:
+            reply = ""
+            try:
+                if self._serial is None:
+                    raise serial.SerialException("serial port is not open")
+                reply = self._command_once(cmd)
+            except (serial.SerialException, OSError, TypeError, ValueError) as e:
+                # a half-open port (USB gone mid-read) fails inside pyserial
+                # in more ways than SerialException alone
+                self.log.warning(f"Serial error sending '{cmd}' ({e}).")
+                self._debug(f"[error] '{cmd}' - {e}")
+            if reply:
+                self._mark_healthy()
+                return reply
+            self._mark_unhealthy()
+            if time.monotonic() >= deadline:
+                return ""
+            self._reconnect(deadline)
+
+    def _heal(self):
+        """Probe a down link, forever, until the dome answers again."""
+        if self._io_healthy or time.monotonic() < self._next_heal:
+            return
+        # schedule the next probe before running this one: the probe itself
+        # can block for a whole serial timeout, and commands arriving in the
+        # meantime must still fast-fail to the cache
+        self._next_heal = time.monotonic() + self["heal_interval"]
+        self._debug("[heal] probing the dome")
+        if self._serial is None and not self._open_port():
+            return
+        reply = ""
+        try:
+            reply = self._command_once("MEADE PROG STATUS")
+        except Exception as e:
+            self._debug(f"[heal] {e}")
+        if reply and self._parse_status(reply) is not None:
+            self._mark_healthy()
+            return
+        self._reconnect()
+        self._mark_unhealthy()
+
+    def _mark_healthy(self):
+        if not self._io_healthy:
+            self.log.info("Dome serial link recovered.")
+        self._io_healthy = True
+
+    def _mark_unhealthy(self):
+        if self._io_healthy:
+            self.log.warning(
+                "Dome is not answering on the serial port; "
+                "status will be served from the last known frame while "
+                "the driver keeps trying to reconnect."
+            )
+        self._io_healthy = False
+        self._next_heal = time.monotonic() + self["heal_interval"]
+
+    def _reconnect(self, deadline=None):
+        """
+        Reopen the serial port after a fatal serial error (e.g. a USB
+        re-enumeration makes reads return EOF and pyserial raise
+        SerialException). Does not reset/move the dome, only the port.
+        Runs on the I/O worker thread only; never raises.
+        """
+        self._close()
+        self._serial = None
+        for delay in self._reconnect_delays:
+            if deadline is not None and time.monotonic() + delay >= deadline:
+                return False
+            time.sleep(delay)
+            try:
+                self._serial = self._create_serial()
+                self.log.info("Reopened the dome serial port.")
+                return True
+            except Exception as e:
+                self.log.warning(f"Dome reconnect failed ({e}).")
+                self._serial = None
+        return False
+
+    def _fail_pending(self):
         while True:
             try:
                 item = self._io_queue.get_nowait()
             except queue.Empty:
                 return
-            if item is not None:
-                item[1].set_exception(error)
-
-    def _reset_dome(self, reset_tag=None):
-        ack = ""
-        # Reset the queue.
-        for _ in range(self._restart_tries):
-            if not ack.startswith("ACK"):
-                ack = self._command("MEADE PROG PARAR")
-                time.sleep(self["retry_delay"])
-        # Restart controller
-        ack = ""
-        for _ in range(self._restart_tries):
-            if not ack.startswith("ACK"):
-                ack = self._command("MEADE PROG RESET")
-                time.sleep(self["retry_delay"])
-
-        if reset_tag is None:
-            return
-
-        # When resetting the dome, move it to the reset_tag
-        ack = self._command(f"MEADE DOMO MOVER = {reset_tag:03d}")
-        if not ack.startswith("ACK"):
-            ack = self._command(f"MEADE DOMO MOVER = {reset_tag:03d}")
-            time.sleep(self["retry_delay"])
-
-        # Wait for the dome to finish moving
-        t0 = time.time()
-        while not self._check_idle():
-            if time.time() - t0 > self["slew_timeout"]:
-                self.log.debug("Timeout moving the dome")
-                return
-            time.sleep(self["poll_interval"])
-
-    # A well-formed STATUS frame: 8 spaces, 3-digit tag, space, '*' and 16
-    # status bits. Motor EMI corrupts single bytes while the dome moves, so
-    # any frame that does not match exactly is discarded instead of trusted.
-    _status_re = re.compile(r"^ {8}(\d{3}) \*([01]{16})$")
-    _status_blank_re = re.compile(r"^ {11} \*[01]{16}$")
-
-    def _get_status(self):
-        """
-        Send MEADE PROG STATUS and parse the reply.
-
-        Returns (tag, busy) for a well-formed frame, "blank" for a valid
-        frame with an empty tag field (dome not initialized), or None for a
-        corrupted/unparseable reply.
-        """
-        ack = self._command("MEADE PROG STATUS")
-        m = self._status_re.match(ack)
-        if m and 801 <= int(m.group(1)) <= 982:
-            tag, busy = int(m.group(1)), m.group(2)[3] == "1"
-            self._status_cache = (tag, busy, time.monotonic())
-            return tag, busy
-        if self._status_blank_re.match(ack):
-            return "blank"
-        self.log.debug(f"Discarding invalid dome status frame ({ack!r}).")
-        return None
-
-    def _check_idle(self):
-        status = self._get_status()
-        if not isinstance(status, tuple):
-            # NAK, blank or corrupted frame: report busy, callers keep polling
-            return False
-        return not status[1]
-
-    def _debug(self, msg):
-        if self._debug_log:
-            print(
-                time.time(),
-                threading.current_thread().name,
-                msg,
-                file=self._debug_log,
-            )
-            self._debug_log.flush()
-
-    def _reconnect(self):
-        """
-        Reopen the serial port after a fatal serial error (e.g. a USB
-        re-enumeration makes reads return EOF and pyserial raise
-        SerialException). Does not reset/move the dome, only the port.
-        Runs on the I/O worker thread only.
-        """
-        self._close()
-        for delay in self._reconnect_delays:
-            try:
-                self._serial = self._create_serial()
-                self.log.info("Reconnected to the dome serial port.")
-                return
-            except serial.SerialException as e:
-                self.log.warning(f"Dome reconnect failed ({e}). Retrying in {delay}s.")
-                time.sleep(delay)
-        self._serial = self._create_serial()
-
-    def _command(self, cmd):
-        """
-        Queue cmd to the I/O worker and wait for the reply. The wait is
-        bounded (one transaction plus a full reconnect cycle), so a sick
-        port surfaces as an exception, never as an indefinitely parked
-        bus worker.
-        """
-        future = Future()
-        self._io_queue.put((cmd, future))
-        deadline = 2 * self["serial_timeout"] + sum(self._reconnect_delays) + 5
-        try:
-            return future.result(timeout=deadline)
-        except TimeoutError:
-            raise ChimeraException(
-                f"Dome serial I/O timed out after {deadline:.0f}s on '{cmd}'"
-            ) from None
-
-    def _transact(self, cmd):
-        """One command transaction on the I/O worker thread."""
-        try:
-            if self._serial is None:
-                raise serial.SerialException("serial port is not open")
-            return self._command_once(cmd)
-        except (serial.SerialException, OSError, TypeError, ValueError) as e:
-            # a half-open port (USB gone mid-read) fails inside pyserial in
-            # more ways than SerialException alone
-            self.log.warning(f"Serial error sending '{cmd}' ({e}). Reconnecting...")
-            self._debug(f"[error] '{cmd}' - {e}")
-            self._reconnect()
-            return self._command_once(cmd)
+            if item is not None and not item[1].done():
+                item[1].set_result("")
 
     def _command_once(self, cmd):
         self._serial.reset_output_buffer()
@@ -307,31 +325,114 @@ class DomeLNA(DomeBase, LampBase):
         self._debug("[read ] '{}'".format(repr(ack).replace("'", "")))
         return ack.replace("\r", "")
 
-    @contextmanager
-    def _motion(self):
+    # ------------------------------------------------------------------
+    # command interface (any thread)
+    # ------------------------------------------------------------------
+
+    def _command(self, cmd, deadline=None):
         """
-        Serialize motion commands (slew, slit, init) with a bounded wait:
-        the I/O queue already serializes port access, this only keeps whole
-        motion sequences from interleaving.
+        Queue cmd to the I/O worker and wait for the reply. Never raises:
+        an unanswered command comes back as "", which every caller already
+        treats as a missing ACK.
         """
-        if not self._motion_lock.acquire(timeout=self["motion_wait"]):
-            raise ChimeraException(
-                "Dome busy: another motion command is running "
-                f"(waited {self['motion_wait']:.0f}s)."
-            )
+        budget = self["io_deadline"] if deadline is None else deadline
+        future = Future()
+        self._io_queue.put((cmd, future, time.monotonic() + budget))
         try:
-            yield
-        finally:
-            self._motion_lock.release()
+            return future.result(timeout=budget + 2 * self["serial_timeout"])
+        except TimeoutError:
+            self.log.warning(f"Dome did not answer '{cmd}' in time.")
+            return ""
+
+    def _command_with_retries(self, cmd, tries=None):
+        """Send cmd until the dome ACKs it. Returns True on ACK."""
+        tries = self._restart_tries if tries is None else tries
+        for attempt in range(tries):
+            if "ACK" in self._command(cmd):
+                return True
+            if attempt + 1 < tries:
+                time.sleep(self["retry_delay"])
+        return False
+
+    def _reset_dome(self, reset_tag=None):
+        # Reset the queue and restart the controller.
+        self._command_with_retries("MEADE PROG PARAR")
+        self._command_with_retries("MEADE PROG RESET")
+        # the controller needs a moment to come back before it takes a move
+        time.sleep(self["retry_delay"])
+
+        if reset_tag is None:
+            return
+
+        # When resetting the dome, move it to the reset_tag
+        self._command_with_retries(f"MEADE DOMO MOVER = {reset_tag:03d}")
+        self._wait_idle(time.monotonic() + self["slew_timeout"])
+
+    # A well-formed STATUS frame: 8 spaces, 3-digit tag, space, '*' and 16
+    # status bits. Motor EMI corrupts single bytes while the dome moves, so
+    # any frame that does not match exactly is discarded instead of trusted.
+    _status_re = re.compile(r"^ {8}(\d{3}) \*([01]{16})$")
+    _status_blank_re = re.compile(r"^ {11} \*[01]{16}$")
+
+    def _parse_status(self, ack):
+        """
+        Parse a MEADE PROG STATUS reply, refreshing the cache on success.
+
+        Returns (tag, busy) for a well-formed frame, "blank" for a valid
+        frame with an empty tag field (dome not initialized), or None for a
+        corrupted/unanswered reply.
+        """
+        m = self._status_re.match(ack)
+        if m and 801 <= int(m.group(1)) <= 982:
+            tag, busy = int(m.group(1)), m.group(2)[3] == "1"
+            self._status_cache = (tag, busy, time.monotonic())
+            return tag, busy
+        if self._status_blank_re.match(ack):
+            return "blank"
+        if ack:
+            self.log.debug(f"Discarding invalid dome status frame ({ack!r}).")
+        return None
+
+    def _get_status(self):
+        # one attempt: a status read must never sit through a reconnect
+        # cycle, callers fall back to the cached frame instead
+        deadline = self["serial_timeout"] + self["retry_delay"]
+        return self._parse_status(self._command("MEADE PROG STATUS", deadline))
+
+    def _check_idle(self):
+        status = self._get_status()
+        if not isinstance(status, tuple):
+            # NAK, blank or corrupted frame: report busy, callers keep polling
+            return False
+        return not status[1]
+
+    def _wait_idle(self, deadline):
+        """Poll until the controller is idle. Returns False on timeout."""
+        while not self._check_idle():
+            if time.monotonic() >= deadline:
+                self.log.debug("Timed out waiting for the dome to become idle.")
+                return False
+            time.sleep(self["poll_interval"])
+        return True
+
+    def _debug(self, msg):
+        if self._debug_log:
+            print(
+                time.time(),
+                threading.current_thread().name,
+                msg,
+                file=self._debug_log,
+            )
+            self._debug_log.flush()
 
     def switch_on(self):
-        ret = "ACK" in self._command("MEADE FLAT_WEAK LIGAR")
+        ret = self._command_with_retries("MEADE FLAT_WEAK LIGAR")
         if ret:
             self._light_on = True
         return ret
 
     def switch_off(self):
-        ret = "ACK" in self._command("MEADE FLAT_WEAK DESLIGAR")
+        ret = self._command_with_retries("MEADE FLAT_WEAK DESLIGAR")
         if ret:
             self._light_on = False
         return ret
@@ -343,25 +444,56 @@ class DomeLNA(DomeBase, LampBase):
         # FIXME: bool(self._command("MEADE PROG STATUS")[19])
         return self._slit_open
 
+    def _acquire_motion(self):
+        """
+        Serialize whole motion sequences (slew, slit, init). The I/O queue
+        already serializes port access; this only keeps two motion sequences
+        from interleaving. Returns False instead of raising when the dome is
+        busy: the caller logs and the control loop retries.
+        """
+        return self._motion_lock.acquire(timeout=self["motion_wait"])
+
     def open_slit(self):
-        with self._motion():
+        if not self._acquire_motion():
+            self.log.warning("Dome busy: not opening the slit now.")
+            return False
+        try:
             self.log.debug("Opening dome slit.")
-            ack = "ACK" in self._command("MEADE TRAPEIRA ABRIR")
+            ack = self._command_with_retries("MEADE TRAPEIRA ABRIR")
             if ack:
                 self._slit_open = True
                 self.slit_opened(self.get_az())
+            else:
+                self.log.error("Dome did not acknowledge the slit open command.")
             return ack
+        finally:
+            self._motion_lock.release()
 
     def close_slit(self):
-        with self._motion():
+        # Closing is the one command that must not fail quietly: keep the
+        # port busy with retries and raise if the dome never acknowledges,
+        # so the supervisor flags an error and tells the operator.
+        acquired = self._acquire_motion()
+        if not acquired:
+            self.log.warning("Dome busy while closing the slit; closing anyway.")
+        try:
             self.log.debug("Closing dome slit.")
-            ack = "ACK" in self._command("MEADE TRAPEIRA FECHAR")
-            if ack:
-                self._slit_open = False
-                self.slit_closed(self.get_az())
+            ack = self._command_with_retries(
+                "MEADE TRAPEIRA FECHAR", tries=2 * self._restart_tries
+            )
+            if not ack:
+                raise DomeCloseFailedException(
+                    "Dome did not acknowledge the slit close command."
+                )
+            self._slit_open = False
+            self.slit_closed(self.get_az())
             return ack
+        finally:
+            if acquired:
+                self._motion_lock.release()
 
     def _get_tag(self):
+        """Current dome tag, or None when the dome will not say."""
         for _ in range(self._status_tries):
             status = self._get_status()
             if isinstance(status, tuple):
@@ -370,12 +502,14 @@ class DomeLNA(DomeBase, LampBase):
                 self.log.info("Initializing dome...")
                 self._init_dome()
                 time.sleep(self["poll_interval"])
-                self.log.info("Dome initialized.")
                 continue
+            if not self._io_healthy:
+                # the link is down and healing in the background: retrying
+                # here only delays the caller
+                break
             time.sleep(self["retry_delay"])
-        raise ChimeraException(
-            f"Could not read a valid dome position after {self._status_tries} tries"
-        )
+        self.log.debug("Could not read a valid dome position.")
+        return None
 
     @staticmethod
     def _tag_to_az(tag):
@@ -399,23 +533,48 @@ class DomeLNA(DomeBase, LampBase):
         return None
 
     def _read_status(self):
-        """Fresh STATUS read through the I/O queue: _get_tag() refreshes
-        the cache with the busy bit of the same frame."""
-        tag = self._get_tag()
-        return tag, self._status_cache[1]
+        """
+        Best-effort (tag, busy). Fresh cache first, then the dome, then the
+        last frame it ever sent — a status query never raises and never
+        waits on a link that is known to be down.
+        """
+        cached = self._cached_status()
+        if cached is not None:
+            return cached
+        if self._io_healthy:
+            tag = self._get_tag()
+            if tag is not None:
+                return tag, self._status_cache[1]
+        if self._status_cache is not None:
+            return self._status_cache[0], self._status_cache[1]
+        return None, False
 
     def get_az(self, tag=None):
-        # cache first: a slew in progress refreshes the cache every
-        # poll_interval, so callers get an instant answer during motion
         if tag is None:
-            cached = self._cached_status()
-            tag = cached[0] if cached else self._read_status()[0]
+            tag, _ = self._read_status()
+        if tag is None:
+            # the dome has never answered since startup: any number here is
+            # a guess, so use the configured init position and say so
+            self.log.warning(
+                f"Dome position unknown; assuming the init azimuth {self._init_az}."
+            )
+            return float(self._init_az)
         return float(self._tag_to_az(tag))
 
+    def is_slewing(self):
+        _, busy = self._read_status()
+        return busy
+
     def _init_dome(self):
-        with self._motion():
+        if not self._acquire_motion():
+            self.log.warning("Dome busy: skipping initialization.")
+            return
+        try:
             self._debug("Initializing dome...")
             self._reset_dome(reset_tag=self._park_tag)
+            self.log.info("Dome initialized.")
+        finally:
+            self._motion_lock.release()
 
     def _get_tracking_telescope(self):
         """
@@ -439,99 +598,101 @@ class DomeLNA(DomeBase, LampBase):
             self.log.debug(f"Telescope not available ({e}). Using geometric model.")
             return None
 
-    def slew_to_az(self, az):
-        with self._motion():
-            return self._do_slew_to_az(az)
+    def _target_tag(self, az):
+        """
+        Dome tag for a telescope pointing: from the empirical lookup table
+        when the telescope is tracking (the LNA telescope is off the dome
+        axis), from the geometric model otherwise.
+        """
+        telescope = self._get_tracking_telescope()
+        if telescope is None:
+            return self._az_to_tag(az)
+        try:
+            alt, telescope_az = telescope.get_position_alt_az()
+            return self._lookup.get_tag_altaz(alt, telescope_az)
+        except Exception as e:
+            self.log.warning(f"Could not use the dome lookup table ({e}).")
+            return self._az_to_tag(az)
 
-    def _do_slew_to_az(self, az):
+    def _on_target(self, dome_tag, precision):
+        tag_now = self._get_tag()
+        if tag_now is None:
+            return False
+        return self._tag_distance(tag_now, dome_tag) <= precision
+
+    def slew_to_az(self, az):
+        """
+        Move the dome. Returns True when the dome reached the target.
+
+        Never raises on a dome fault: in Track mode the control loop
+        re-queues the move on the next cycle, so a dome that is briefly
+        unreachable keeps being retried instead of aborting the exposure
+        (or the whole program) that asked for the sync.
+        """
         if az > 360:
             raise InvalidDomePositionException(
                 f"Cannot slew to {az}. Outside azimuth limits."
             )
+        if not self._acquire_motion():
+            self.log.warning(f"Dome busy: cannot slew to {az} right now.")
+            return False
+        try:
+            return self._do_slew_to_az(az)
+        except Exception as e:
+            self.log.exception(f"Dome slew to {az} failed ({e}).")
+            return False
+        finally:
+            self._motion_lock.release()
 
-        # Calculate the dome azimuth offset using the lookup table when the
-        # telescope is available and tracking.
-        telescope = self._get_tracking_telescope()
-        if telescope is not None:
-            alt, telescope_az = telescope.get_position_alt_az()
-            dome_tag = self._lookup.get_tag_altaz(alt, telescope_az)
-        else:
-            dome_tag = self._az_to_tag(az)
+    def _do_slew_to_az(self, az):
+        if not self._io_healthy:
+            # the worker is already reconnecting; spinning here would only
+            # burn the slew timeout against a port that cannot answer
+            self.log.warning(f"Dome is not answering: postponing the slew to {az}.")
+            return False
+
+        dome_tag = self._target_tag(az)
 
         # Don't move (nor disturb the controller) if already on position.
-        if self._tag_distance(dome_tag, self._get_tag()) <= self._dome_precision:
+        if self._on_target(dome_tag, self._dome_precision):
             return True
 
-        # MOVER is NAKed while the controller is busy: if a previous command
-        # left the dome moving, wait for it instead of triggering a reset.
-        t0 = time.time()
-        while not self._check_idle():
-            if time.time() - t0 > self["slew_timeout"]:
-                self.log.warning("Dome busy for too long before slew. Resetting...")
-                self._reset_dome()
-                break
-            time.sleep(self["poll_interval"])
-
-        # Run dome move command.
-        # Works on the first try?
-        if "ACK" in self._command(f"MEADE DOMO MOVER = {dome_tag:03d}"):
-            time.sleep(self["poll_interval"])
-        else:  # If not, reset the dome and try more few times...
-            time.sleep(self["retry_delay"])
-            ack = self._command(f"MEADE DOMO MOVER = {dome_tag:03d}")
-            for _ in range(self._restart_tries):
-                if not ack.startswith("ACK"):
-                    self.log.debug("No ACK from dome when trying to slew. Retrying...")
-                    self._reset_dome(self._recovery_tag(dome_tag))
-                    time.sleep(self["retry_delay"])
-                    ack = self._command(f"MEADE DOMO MOVER = {dome_tag:03d}")
-                    time.sleep(self["poll_interval"])
-
+        deadline = time.monotonic() + self["slew_timeout"]
         self.slew_begin(az)
-        t0 = time.time()
-        while not self._check_idle():
-            if time.time() - t0 > self["slew_timeout"]:
-                self.log.debug("Timeout moving the dome. Resetting...")
-                self._reset_dome(self._recovery_tag(dome_tag))
-                break
-            time.sleep(self["poll_interval"])
 
-        # Check the final position.
-        # If the position is too far from the desired (restart_precision),
-        # try to restart the dome and put it on the correct position.
-        for i_retry in range(self._restart_tries):
-            t0 = time.time()
-            tag_now = self._get_tag()
-            if self._tag_distance(tag_now, dome_tag) < self._restart_precision:
-                # If position is wrong for less than restart_precision, just confirm.
-                self.slew_complete(self.get_az(tag_now), DomeStatus.OK)
+        attempt = 0
+        while time.monotonic() < deadline:
+            attempt += 1
+            # MOVER is NAKed while the controller is busy: if a previous
+            # command left the dome moving, wait for it instead of
+            # triggering a reset.
+            self._wait_idle(deadline)
+
+            if not self._command_with_retries(f"MEADE DOMO MOVER = {dome_tag:03d}"):
+                self.log.debug("No ACK from dome when trying to slew. Restarting...")
+                self._reset_dome(self._recovery_tag(dome_tag))
+                continue
+
+            self._wait_idle(deadline)
+
+            # If the position is off by more than restart_precision, restart
+            # the dome and drive it to the target again.
+            if self._on_target(dome_tag, self._restart_precision):
+                self.slew_complete(self.get_az(), DomeStatus.OK)
                 return True
 
             self.log.debug(
-                f"Dome position error >= {self._restart_precision}. "
-                f"Restart dome try {i_retry}."
+                f"Dome position error >= {self._restart_precision} tags "
+                f"(attempt {attempt}). Restarting dome."
             )
-
             self._reset_dome(self._recovery_tag(dome_tag))
 
-            ack = ""
-            for _ in range(self._restart_tries):
-                if not ack.startswith("ACK"):
-                    ack = self._command(f"MEADE DOMO MOVER = {dome_tag:03d}")
-                    time.sleep(self["retry_delay"])
-
-            # Try to move the dome again
-            while not self._check_idle():
-                if time.time() - t0 > self["slew_timeout"]:
-                    self.log.debug("Timeout moving the dome")
-                    break
-                time.sleep(self["poll_interval"])
-
-        self.slew_complete(self.get_az(), DomeStatus.ABORTED)
-        raise DomeSlewTimeoutException(
-            f"Dome did not reach tag {dome_tag} after "
-            f"{self._restart_tries} restarts (currently at {self._get_tag():.0f})"
+        self.log.warning(
+            f"Dome did not reach tag {dome_tag} within {self['slew_timeout']}s. "
+            "Will retry on the next control cycle."
         )
+        self.slew_complete(self.get_az(), DomeStatus.ABORTED)
+        return False
 
     @staticmethod
     def _tag_distance(tag_a, tag_b):
@@ -559,14 +720,8 @@ class DomeLNA(DomeBase, LampBase):
         time.sleep(15)
 
     def abort_slew(self):
-        raise NotImplementedError()
-
-    def is_slewing(self):
-        # cache first, for the same reason as get_az()
-        cached = self._cached_status()
-        if cached is not None:
-            return cached[1]
-        return self._read_status()[1]
+        """Stop the dome where it is (PARAR)."""
+        return self._command_with_retries("MEADE PROG PARAR")
 
     def is_sync_with_tel(self):
         # The LNA telescope is off the dome axis: dome az != telescope az by
@@ -574,14 +729,21 @@ class DomeLNA(DomeBase, LampBase):
         # check reports "not synced" for almost every correct pointing. Ask
         # the question slew_to_az answers instead: are we on the tag the
         # lookup table wants for the telescope's alt/az?
-        telescope = self._get_tracking_telescope()
-        if telescope is None:
-            return super().is_sync_with_tel()
-        alt, telescope_az = telescope.get_position_alt_az()
-        dome_tag = self._lookup.get_tag_altaz(alt, telescope_az)
-        cached = self._cached_status()
-        tag = cached[0] if cached else self._read_status()[0]
-        return self._tag_distance(tag, dome_tag) <= self._dome_precision
+        try:
+            telescope = self._get_tracking_telescope()
+            if telescope is None:
+                return super().is_sync_with_tel()
+            alt, telescope_az = telescope.get_position_alt_az()
+            dome_tag = self._lookup.get_tag_altaz(alt, telescope_az)
+            tag, _ = self._read_status()
+            if tag is None:
+                return False
+            return self._tag_distance(tag, dome_tag) <= self._dome_precision
+        except Exception as e:
+            # answering "not synced" only picks a log line in the caller;
+            # raising would abort the exposure asking the question
+            self.log.warning(f"Could not check the dome sync ({e}).")
+            return False
 
     def get_metadata(self, request):
         # Check first if there is metadata from an metadata override method.

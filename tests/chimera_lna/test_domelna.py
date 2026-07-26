@@ -20,6 +20,16 @@ from chimera_lna.simulators.dome import DomeSimulator
 # fast dome: full turn in less than a second
 SIMULATOR_SPEED = 500.0  # tags/s
 FAST_TIMINGS = {"retry_delay": 0.01, "poll_interval": 0.01}
+# same, plus short serial/heal budgets so the failure paths (which are all
+# timeout-driven) run in seconds instead of minutes
+DEAD_LINK_TIMINGS = {
+    **FAST_TIMINGS,
+    "serial_timeout": 0.5,
+    "io_deadline": 2.0,
+    "heal_interval": 0.2,
+    "slew_timeout": 3.0,
+    "motion_wait": 2.0,
+}
 
 
 @pytest.fixture
@@ -235,9 +245,9 @@ def _proxy(manager, path):
 
 class TestDomeLNAConcurrency:
     """The serial port is owned by one I/O thread: status queries must keep
-    answering during a slew, motion commands must exclude each other with a
-    bounded 'busy' error, and a broken connection must recover or surface as
-    a clean exception - never wedge a caller."""
+    answering during a slew, motion sequences must exclude each other, and a
+    broken link must degrade gracefully - never wedge a caller and never
+    raise into the exposure path."""
 
     def test_status_reads_answer_during_slew(self, manager):
         with DomeSimulator(initial_tag=900, tags_per_second=30) as simulator:
@@ -284,7 +294,7 @@ class TestDomeLNAConcurrency:
             assert latencies and max(latencies) < 2.0
             assert simulator.current_tag == DomeLNA._az_to_tag(180.0)
 
-    def test_concurrent_motion_gets_busy_error(self, manager):
+    def test_concurrent_motion_declines_without_raising(self, manager):
         with DomeSimulator(initial_tag=900, tags_per_second=20) as simulator:
             dome = manager.add_class(
                 DomeLNA,
@@ -304,8 +314,10 @@ class TestDomeLNAConcurrency:
                 time.sleep(0.01)
             assert simulator.is_moving
 
-            with pytest.raises(Exception, match="Dome busy|ChimeraException"):
-                dome.open_slit()
+            # busy is a False, not an exception: the caller (a checklist
+            # item, an exposure sync) must not be killed by a busy dome
+            assert dome.open_slit() is False
+            assert dome.is_slit_open() is False
             slewer.join()
 
     def test_reconnects_after_connection_drop(self, dome, simulator):
@@ -315,22 +327,90 @@ class TestDomeLNAConcurrency:
         dome.slew_to_az(180.0)
         assert simulator.current_tag == DomeLNA._az_to_tag(180.0)
 
-    def test_dead_port_raises_quickly_instead_of_hanging(self, manager):
+    def test_dead_port_degrades_instead_of_raising(self, manager):
+        # the 2026-07-26 failure: a dome hiccup raised
+        # "Dome serial I/O timed out" out of the FITS-header gathering and
+        # killed the exposure. Nothing a camera calls may raise.
         simulator = DomeSimulator(initial_tag=900, tags_per_second=500.0).start()
         dome = manager.add_class(
             _FastReconnectDome,
             "lna",
-            config={
-                "device": simulator.device,
-                "serial_timeout": 0.5,
-                **FAST_TIMINGS,
-            },
+            config={"device": simulator.device, **DEAD_LINK_TIMINGS},
         )
+        last_az = dome.get_az()
         simulator.drop_connections()
         simulator.stop()
+
         t0 = time.time()
-        with pytest.raises(Exception, match="Serial|serial"):
-            dome.slew_to_az(180.0)
-        # bounded: one transaction + the (shortened) reconnect cycle,
-        # nowhere near a request-timeout wedge
-        assert time.time() - t0 < 10
+        assert dome.get_az() == last_az  # last known frame, not an exception
+        assert dome.is_slewing() is False
+        assert dome.is_slit_open() is False
+        assert isinstance(dome.is_sync_with_tel(), bool)
+        assert dome.slew_to_az(180.0) is False
+        assert dome.get_metadata(None)  # header gathering still works
+        assert time.time() - t0 < 30
+
+    def test_recovers_on_its_own_when_the_dome_comes_back(self, manager):
+        # a power-cycled controller (2026-07-25) must not need a chimera
+        # restart: the worker keeps probing until the dome answers again
+        simulator = DomeSimulator(initial_tag=900, tags_per_second=500.0).start()
+        port = simulator.port
+        dome = manager.add_class(
+            _FastReconnectDome,
+            "lna",
+            config={"device": simulator.device, **DEAD_LINK_TIMINGS},
+        )
+        assert dome.slew_to_az(150.0) is True
+        simulator.drop_connections()
+        simulator.stop()
+        assert dome.slew_to_az(180.0) is False  # down, and says so
+
+        recovered = DomeSimulator(port=port, initial_tag=900, tags_per_second=500.0)
+        recovered.start()
+        try:
+            t0 = time.time()
+            while time.time() - t0 < 20:
+                if dome.slew_to_az(180.0):
+                    break
+                time.sleep(0.2)
+            assert recovered.current_tag == DomeLNA._az_to_tag(180.0)
+        finally:
+            recovered.stop()
+
+    def test_close_slit_raises_when_the_dome_never_answers(self, simulator, manager):
+        # the one exception left: an open slit that silently fails to close
+        # is a hazard, so the supervisor must hear about it
+        dome = manager.add_class(
+            _FastReconnectDome,
+            "lna",
+            config={"device": simulator.device, **DEAD_LINK_TIMINGS},
+        )
+        dome.open_slit()
+        assert dome.is_slit_open()
+        simulator.muted = True  # controller hung: link up, no replies
+        with pytest.raises(Exception, match="DomeCloseFailed|close"):
+            dome.close_slit()
+        assert dome.is_slit_open()  # state must not lie about a failed close
+
+    def test_muted_controller_does_not_raise_on_status(self, simulator, manager):
+        # port healthy, controller silent (2026-07-23): reads must fall back
+        # to the last known frame instead of raising a serial timeout
+        dome = manager.add_class(
+            _FastReconnectDome,
+            "lna",
+            config={"device": simulator.device, **DEAD_LINK_TIMINGS},
+        )
+        last_az = dome.get_az()
+        simulator.muted = True
+        t0 = time.time()
+        assert dome.get_az() == last_az
+        assert dome.is_slewing() is False
+        assert time.time() - t0 < 20
+
+        simulator.muted = False
+        t0 = time.time()
+        while time.time() - t0 < 20:
+            if dome.slew_to_az(180.0):
+                break
+            time.sleep(0.2)
+        assert simulator.current_tag == DomeLNA._az_to_tag(180.0)
