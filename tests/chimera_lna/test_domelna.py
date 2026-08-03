@@ -198,6 +198,32 @@ class TestDomeLNALifecycle:
         assert metadata["DOME_SLT"] == "Closed"
         assert "DOME_AZ" in metadata
 
+    def test_metadata_reports_the_live_mode(self, simulator, manager):
+        """DOME_TRK follows track()/stand(), not the mode the dome started in."""
+        telescope = manager.add_class(FakeTelescope, "trk")
+        telescope.start_tracking()
+        dome = manager.add_class(
+            DomeLNA,
+            "trk",
+            config={
+                "device": simulator.device,
+                "telescope": "/FakeTelescope/trk",
+                "mode": "Stand",
+                **FAST_TIMINGS,
+            },
+        )
+
+        def mode():
+            return dict((key, value) for key, value, _ in dome.get_metadata(None))[
+                "DOME_TRK"
+            ]
+
+        assert mode() == "Stand"
+        dome.track()
+        assert mode() == "Track"
+        dome.stand()
+        assert mode() == "Stand"
+
     def test_is_sync_with_tel_uses_lookup_table(self, simulator, manager):
         # off-axis dome: dome az != telescope az by design, so the base
         # on-axis check would report "not synced" for a correctly positioned
