@@ -756,7 +756,8 @@ class DomeLNA(DomeBase, LampBase):
         return [
             ("DOME_MDL", str(self["model"]), "Dome Model"),
             ("DOME_TYP", str(self["style"]), "Dome Type"),
-            ("DOME_TRK", str(self["mode"]), "Dome Tracking/Standing"),
+            # the live mode: self["mode"] is only the one the dome started in
+            ("DOME_TRK", str(self.get_mode()), "Dome Tracking/Standing"),
             ("DOME_AZ", str(self.get_az()), "Dome Azimuth"),
             ("DOME_SLT", str(slit), "Dome slit status"),
         ]
