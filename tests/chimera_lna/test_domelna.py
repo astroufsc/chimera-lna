@@ -224,7 +224,7 @@ class TestDomeLNALifecycle:
         dome.stand()
         assert mode() == "Stand"
 
-    def test_is_sync_with_tel_uses_lookup_table(self, simulator, manager):
+    def test_is_sync_with_tel_uses_geometry_model(self, simulator, manager):
         # off-axis dome: dome az != telescope az by design, so the base
         # on-axis check would report "not synced" for a correctly positioned
         # dome. The override must agree with where slew_to_az goes.
@@ -240,7 +240,7 @@ class TestDomeLNALifecycle:
             },
         )
         # with the telescope tracking, the az argument is overridden by the
-        # lookup-table tag for the telescope's alt/az
+        # geometry-model tag for the telescope's alt/az
         dome.slew_to_az(0.0)
         assert dome.is_sync_with_tel()
 

@@ -21,7 +21,7 @@ from chimera.interfaces.dome import (
     Style,
 )
 
-from chimera_lna.util.lookup_table import DomeLookupTable
+from chimera_lna.util.dome_geometry import DomeGeometry
 
 
 class DomeSlewTimeoutException(ChimeraException):
@@ -70,6 +70,14 @@ class DomeLNA(DomeBase, LampBase):
         "motion_wait": 20.0,  # seconds to wait for a running motion command
         "io_deadline": 30.0,  # seconds a command may spend retrying the port
         "heal_interval": 5.0,  # seconds between reconnect probes while down
+        # GEM dome geometry, in units of the dome radius, fitted to the 2016
+        # mapping run (see util/dome_geometry.py, scripts/fit_dome_geometry.py)
+        "latitude": -22.5344,
+        "mount_offset_east": -0.0384,
+        "mount_offset_north": -0.0142,
+        "mount_offset_up": -0.4356,
+        "gem_offset": -0.3899,
+        "dome_az_offset": 19.73,  # tag-ring zero point error, degrees
     }
 
     def __init__(self):
@@ -119,8 +127,8 @@ class DomeLNA(DomeBase, LampBase):
         self._status_cache = None
         self._status_cache_ttl = 2.0  # seconds; > poll_interval
 
-        # Load LookUp table
-        self._lookup = DomeLookupTable()
+        # Built lazily: config is only applied after __init__
+        self._geometry = None
 
         # Debug file
         self._debug_log = None
@@ -585,33 +593,46 @@ class DomeLNA(DomeBase, LampBase):
             telescope = self.telescope
             if not telescope.ping():
                 self.log.error(
-                    "I need to know the telescope position to use the lookup table!"
+                    "I need to know the telescope position to correct for the "
+                    "dome geometry!"
                 )
                 return None
             if not telescope.is_tracking():
-                self.log.debug(
-                    "Telescope is not Tracking. Ignoring the dome lookup table."
-                )
+                self.log.debug("Telescope is not Tracking. Ignoring the dome geometry.")
                 return None
             return telescope
         except Exception as e:
-            self.log.debug(f"Telescope not available ({e}). Using geometric model.")
+            self.log.debug(f"Telescope not available ({e}). Slaving the dome on-axis.")
             return None
+
+    def _dome_geometry(self):
+        if self._geometry is None:
+            self._geometry = DomeGeometry(
+                latitude=self["latitude"],
+                mount_offset=(
+                    self["mount_offset_east"],
+                    self["mount_offset_north"],
+                    self["mount_offset_up"],
+                ),
+                gem_offset=self["gem_offset"],
+                az_offset=self["dome_az_offset"],
+            )
+        return self._geometry
 
     def _target_tag(self, az):
         """
-        Dome tag for a telescope pointing: from the empirical lookup table
-        when the telescope is tracking (the LNA telescope is off the dome
-        axis), from the geometric model otherwise.
+        Dome tag for a telescope pointing: from the offset-mount geometry
+        model when the telescope is tracking (the LNA telescope is off the
+        dome axis), on-axis otherwise.
         """
         telescope = self._get_tracking_telescope()
         if telescope is None:
             return self._az_to_tag(az)
         try:
             alt, telescope_az = telescope.get_position_alt_az()
-            return self._lookup.get_tag_altaz(alt, telescope_az)
+            return self._az_to_tag(self._dome_geometry().dome_az(alt, telescope_az))
         except Exception as e:
-            self.log.warning(f"Could not use the dome lookup table ({e}).")
+            self.log.warning(f"Could not use the dome geometry model ({e}).")
             return self._az_to_tag(az)
 
     def _on_target(self, dome_tag, precision):
@@ -728,13 +749,13 @@ class DomeLNA(DomeBase, LampBase):
         # design (median 24 deg), so the base on-axis |tel_az - dome_az|
         # check reports "not synced" for almost every correct pointing. Ask
         # the question slew_to_az answers instead: are we on the tag the
-        # lookup table wants for the telescope's alt/az?
+        # geometry model wants for the telescope's alt/az?
         try:
             telescope = self._get_tracking_telescope()
             if telescope is None:
                 return super().is_sync_with_tel()
             alt, telescope_az = telescope.get_position_alt_az()
-            dome_tag = self._lookup.get_tag_altaz(alt, telescope_az)
+            dome_tag = self._az_to_tag(self._dome_geometry().dome_az(alt, telescope_az))
             tag, _ = self._read_status()
             if tag is None:
                 return False
